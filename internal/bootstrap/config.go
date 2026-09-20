@@ -66,6 +66,9 @@ type ProviderConfig struct {
 	// LocalAI/ollama 等自建慢推理首块可远超 5 分钟，按 provider 放宽即可，
 	// 不拖累其它通道的挂死检测（#79）。
 	StreamIdleTimeout string `json:"stream_idle_timeout,omitempty"`
+	// DisableStreaming 用于兼容声明支持工具调用、但流式 tool_call 分片不稳定的网关。
+	// 关闭流式不影响工具调用，只会让一次模型回复在完成后交付给引擎。
+	DisableStreaming bool `json:"disable_streaming,omitempty"`
 }
 
 // ModelConfig 描述某个 provider 下可切换的模型及其可选上下文窗口。

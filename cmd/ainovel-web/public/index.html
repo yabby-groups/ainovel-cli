@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Novel Studio</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span>AN</span><strong>AI Novel Studio</strong></div>
+  <div id="status" class="status">就绪</div>
+</header>
+<main>
+  <section class="panel bookshelf">
+    <div class="panel-head"><div><p class="kicker">BOOKSHELF</p><h2>Books</h2></div><span id="bookMsg"></span></div>
+    <div class="bookshelf-bar">
+      <select id="bookSelect" title="Active book"></select>
+      <input id="newBookName" placeholder="New book name">
+      <button id="createBook">New</button>
+      <button id="switchBook" class="quiet">Switch</button>
+    </div>
+  </section>
+
+  <section class="panel settings">
+    <div class="panel-head"><div><p class="kicker">ENGINE SETTINGS</p><h2>模型配置</h2></div><span id="configPath" class="path"></span></div>
+    <div class="settings-grid">
+      <label>Provider<select id="cfgProvider"></select></label>
+      <label>API Key<input id="cfgApiKey" type="password" placeholder="sk-..." autocomplete="off"></label>
+      <label>Base URL<input id="cfgBaseUrl" placeholder="https://openrouter.ai/api/v1"></label>
+      <label>默认 Model<select id="cfgModel"></select></label>
+      <label style="grid-column:1/-1">模型列表<textarea id="cfgModels" class="models-editor" style="width:100%;min-height:110px;margin:0" placeholder="每行一个模型 ID"></textarea></label>
+    </div>
+    <div class="settings-foot"><button id="saveConfig" class="quiet">保存配置</button><span id="configMsg"></span></div>
+  </section>
+
+  <div class="two-col">
+    <div class="col">
+      <section class="panel">
+        <div class="panel-head"><div><p class="kicker">MODEL ROUTING</p><h2>模型路由</h2></div></div>
+        <div class="body-grid">
+          <label>角色<select id="roleSel">
+            <option value="default">默认</option>
+            <option value="architect">Architect</option>
+            <option value="writer">Writer</option>
+            <option value="editor">Editor</option>
+          </select></label>
+          <label>Provider<select id="providerSel"></select></label>
+          <label>Model<input id="modelInput" list="modelList" placeholder="模型名"><datalist id="modelList"></datalist></label>
+          <label>推理强度<select id="thinkingSel"></select></label>
+          <button id="applyModel">应用模型</button>
+        </div>
+      </section>
+
+      <section class="panel composer">
+        <div class="panel-head"><div><p class="kicker">CREATE</p><h2>创作</h2></div></div>
+        <textarea id="prompt" placeholder="输入一句小说需求，例如：写一本东方玄幻长篇，主角从边陲小城起步…"></textarea>
+        <div class="row-buttons">
+          <button id="start">开始创作</button>
+          <button id="resume" class="quiet">恢复创作</button>
+          <button id="cocreateOpen" class="quiet">冷启动共创</button>
+          <button id="stageCocreate" class="quiet">阶段共创</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><div><p class="kicker">CONTROL</p><h2>控制</h2></div></div>
+        <div class="body-grid">
+          <input id="steerInput" placeholder="输入干预/续写意见">
+          <button id="steerBtn">发送干预</button>
+          <button id="continueBtn" class="quiet">继续</button>
+          <button id="reviewBtn" class="quiet">逐章验收</button>
+          <button id="nextBtn" class="quiet">放行下一章</button>
+          <button id="stopBtn" class="danger">停止</button>
+          <input id="reopenInput" placeholder="重开续写方向（可空）">
+          <button id="reopenBtn" class="quiet">重开</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><div><p class="kicker">ADVANCED</p><h2>高级工具</h2></div></div>
+        <div class="body-grid">
+          <label>导入路径<input id="importPath" placeholder="/path/to/novel.txt"></label>
+          <label>切分指导<input id="importGuide" placeholder="自然语言切分指导"></label>
+          <div class="inline-checks"><label><input type="checkbox" id="importAuto"> 自动确认</label><label><input type="checkbox" id="importContinue"> 导入后续写</label></div>
+          <button id="importBtn">语义导入</button>
+          <label>导出路径<input id="exportPath" placeholder="空=默认"></label>
+          <label>格式<select id="exportFormat"><option value="txt">TXT</option><option value="epub">EPUB</option></select></label>
+          <div class="inline-checks"><input id="exportFrom" placeholder="from"><input id="exportTo" placeholder="to"><label><input type="checkbox" id="exportOverwrite"> 覆盖</label></div>
+          <button id="exportBtn">导出</button>
+          <button id="syncBtn" class="quiet">同步修订</button>
+          <button id="syncCheckBtn" class="quiet">检查修订</button>
+          <button id="diagBtn" class="quiet">诊断报告</button>
+          <button id="simulateBtn" class="quiet">仿写画像</button>
+          <label>导入仿写画像<input id="importsimPath" placeholder="profile.json"></label>
+          <button id="importsimBtn" class="quiet">导入画像</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="panel">
+        <div class="panel-head"><div><p class="kicker">SNAPSHOT</p><h2>状态</h2></div></div>
+        <div id="snapshot" class="snapshot"><p class="empty">未连接引擎</p></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><div><p class="kicker">LIVE OUTPUT</p><h2>创作流</h2></div></div>
+        <div id="stream" class="stream"><p class="empty">等待创作输出</p></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><div><p class="kicker">EVENTS</p><h2>事件</h2></div><span id="eventCount">0</span></div>
+        <div id="events" class="events"><p class="empty">等待事件</p></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><div><p class="kicker">CHAPTERS</p><h2>章节</h2></div><button id="refresh" class="quiet">刷新</button></div>
+        <div id="chapters" class="chapters"><p class="empty">还没有章节</p></div>
+      </section>
+
+      <section class="panel" id="cocreatePanel" hidden>
+        <div class="panel-head"><div><p class="kicker">CO-CREATE</p><h2>共创</h2></div></div>
+        <div id="cocreateChat" class="events"></div>
+        <div class="row-buttons">
+          <input id="cocreateInput" placeholder="补充需求">
+          <button id="cocreateSend">发送</button>
+          <button id="cocreateApply">应用并开始</button>
+          <button id="cocreateCancel" class="quiet">取消</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<dialog id="chapterDialog">
+  <button id="close" class="close">×</button>
+  <h2 id="chapterTitle"></h2>
+  <article id="chapterContent"></article>
+</dialog>
+<div id="apiToast" role="status" aria-live="polite"></div>
+<style>
+#apiToast{position:fixed;right:22px;bottom:22px;z-index:20;display:none;max-width:min(520px,calc(100vw - 44px));padding:12px 15px;background:#071b1b;border:1px solid #19c3b1;border-left:4px solid #35ead5;color:#8ffbed;border-radius:5px;box-shadow:0 8px 28px #001313aa;font:13px/1.55 "Cascadia Mono","Consolas","Courier New",monospace;white-space:pre-wrap;text-shadow:0 0 7px #19c3b177}
+#apiToast.show{display:block;animation:toast-in .18s ease-out}
+#apiToast.error{border-color:#ff6b6b;color:#ffb1b1;text-shadow:0 0 7px #ff4d4d66}
+@keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+</style>
+<script src="/app.js"></script>
+</body>
+</html>

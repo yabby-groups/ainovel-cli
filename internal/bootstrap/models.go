@@ -380,7 +380,7 @@ func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache m
 		return nil, fmt.Errorf("provider %s stream_idle_timeout: %w: %w", providerKey, errs.ErrConfig, err)
 	}
 
-	m, err := llm.NewModel(providerType, model,
+	baseModel, err := llm.NewModel(providerType, model,
 		llm.WithAPIKey(pc.APIKey),
 		llm.WithBaseURL(pc.BaseURL),
 		llm.WithStreamIdleTimeout(streamIdle),
@@ -390,8 +390,53 @@ func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache m
 	if err != nil {
 		return nil, fmt.Errorf("provider %s (%s): %w: %w", providerKey, providerType, errs.ErrProvider, err)
 	}
+	var m agentcore.ChatModel = baseModel
+	if pc.DisableStreaming {
+		m = &nonStreamingModel{model: baseModel}
+	}
 	cache[cacheKey] = m
 	return m, nil
+}
+
+// nonStreamingModel 保留 ChatModel 的工具调用能力，但把一次 Generate
+// 结果包装成单个 Done 事件。部分 OpenAI 兼容网关的 SSE tool_calls 会把
+// function.name 拆丢；非流式响应通常仍是完整且可校验的。
+type nonStreamingModel struct {
+	model agentcore.ChatModel
+}
+
+func (m *nonStreamingModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	return m.model.Generate(ctx, messages, tools, opts...)
+}
+
+func (m *nonStreamingModel) GenerateStream(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
+	out := make(chan agentcore.StreamEvent, 2)
+	go func() {
+		defer close(out)
+		resp, err := m.Generate(ctx, messages, tools, opts...)
+		if err != nil {
+			out <- agentcore.StreamEvent{Type: agentcore.StreamEventError, Err: err}
+			return
+		}
+		out <- agentcore.StreamEvent{Type: agentcore.StreamEventDone, Message: resp.Message, StopReason: resp.Message.StopReason}
+	}()
+	return out, nil
+}
+
+func (m *nonStreamingModel) SupportsTools() bool { return m.model.SupportsTools() }
+
+func (m *nonStreamingModel) ProviderName() string {
+	if v, ok := m.model.(agentcore.ProviderNamer); ok {
+		return v.ProviderName()
+	}
+	return ""
+}
+
+func (m *nonStreamingModel) ModelName() string {
+	if v, ok := m.model.(agentcore.ModelNamer); ok {
+		return v.ModelName()
+	}
+	return ""
 }
 
 type failoverModel struct {

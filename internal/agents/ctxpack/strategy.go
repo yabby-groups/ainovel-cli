@@ -68,7 +68,7 @@ func (s *StoreSummaryCompactStrategy) apply(_ context.Context, msgs []agentcore.
 		return msgs, corecontext.StrategyResult{Name: s.Name()}, nil
 	}
 
-	cut := corecontext.FindCutPoint(msgs, s.keepRecentTokens)
+	cut := findCutPointCompat(msgs, s.keepRecentTokens)
 	if cut.FirstKeptIndex <= 0 {
 		return msgs, corecontext.StrategyResult{Name: s.Name()}, nil
 	}
@@ -114,6 +114,54 @@ func (s *StoreSummaryCompactStrategy) apply(_ context.Context, msgs []agentcore.
 		Name:        s.Name(),
 		Info:        info,
 	}, nil
+}
+
+// findCutPointCompat mirrors agentcore's context boundary rules. The dependency
+// keeps the helper unexported while ainovel-cli needs its result metadata.
+type cutPointCompat struct {
+	FirstKeptIndex int
+	IsSplitTurn    bool
+}
+
+func findCutPointCompat(msgs []agentcore.AgentMessage, keepTokens int) cutPointCompat {
+	if len(msgs) == 0 {
+		return cutPointCompat{}
+	}
+	accumulated, cutIndex := 0, len(msgs)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		accumulated += corecontext.EstimateTokens(msgs[i])
+		if accumulated >= keepTokens {
+			cutIndex = i
+			break
+		}
+	}
+	if cutIndex >= len(msgs) {
+		return cutPointCompat{}
+	}
+	for cutIndex < len(msgs) {
+		msg, ok := msgs[cutIndex].(agentcore.Message)
+		if !ok || msg.Role == agentcore.RoleUser {
+			break
+		}
+		if msg.Role == agentcore.RoleTool {
+			// Keep the assistant tool call together with its result. The
+			// upstream helper is unexported and its current boundary walk can
+			// skip the entire suffix when the estimated cut lands on a result.
+			if cutIndex > 0 {
+				cutIndex--
+			}
+			break
+		}
+		if msg.Role == agentcore.RoleAssistant && msg.HasToolCalls() {
+			break
+		}
+		break
+	}
+	if cutIndex >= len(msgs) {
+		return cutPointCompat{}
+	}
+	msg, ok := msgs[cutIndex].(agentcore.Message)
+	return cutPointCompat{FirstKeptIndex: cutIndex, IsSplitTurn: !ok || msg.Role != agentcore.RoleUser}
 }
 
 const (
