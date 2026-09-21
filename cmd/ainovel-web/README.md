@@ -2,6 +2,10 @@
 
 `ainovel-web` is a server-side Myna OAuth client. Register a public Myna OAuth
 client with `profile:read token_base:read token_base:write offline_access`.
+Set the client's `return_url` to the public HTTPS root URL of this deployment
+(for example, `https://novel.example.com/`). The web app requests this return
+only for WeChat's embedded browser, so Myna can navigate back to the pending
+device-login page after the user approves authorization.
 
 Set these deployment environment variables before starting the service:
 

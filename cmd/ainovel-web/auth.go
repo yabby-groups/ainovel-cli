@@ -178,13 +178,17 @@ func (a *authService) form(ctx context.Context, endpoint string, values url.Valu
 	return resp.StatusCode, nil
 }
 
-func (a *authService) startDevice(ctx context.Context) (map[string]any, error) {
+func (a *authService) startDevice(ctx context.Context, returnAfterAuthorization bool) (map[string]any, error) {
 	var result struct {
 		DeviceCode, UserCode, VerificationURI, VerificationURIComplete string `json:"-"`
 		ExpiresIn, Interval                                            int    `json:"-"`
 	}
 	var raw map[string]any
-	status, err := a.form(ctx, a.endpoint("/oauth/device/code"), url.Values{"client_id": {a.cfg.clientID}, "scope": {"profile:read token_base:read token_base:write offline_access"}}, &raw)
+	values := url.Values{"client_id": {a.cfg.clientID}, "scope": {"profile:read token_base:read token_base:write offline_access"}}
+	if returnAfterAuthorization {
+		values.Set("completion_action", "return")
+	}
+	status, err := a.form(ctx, a.endpoint("/oauth/device/code"), values, &raw)
 	if err != nil {
 		return nil, err
 	}

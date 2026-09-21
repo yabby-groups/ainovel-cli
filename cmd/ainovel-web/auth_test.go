@@ -66,6 +66,46 @@ func TestLoadAuthConfigRejectsInvalidSecrets(t *testing.T) {
 	}
 }
 
+func TestStartDeviceRequestsReturnOnlyWhenAsked(t *testing.T) {
+	var completionActions []string
+	myna := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/oauth/device/code" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("client_id") != "client" || r.Form.Get("scope") != "profile:read token_base:read token_base:write offline_access" {
+			t.Fatalf("form = %#v", r.Form)
+		}
+		completionActions = append(completionActions, r.Form.Get("completion_action"))
+		writeJSON(w, map[string]any{
+			"device_code":               "device-code",
+			"user_code":                 "ABCD-EFGH",
+			"verification_uri":          "https://myna.test/oauth/device",
+			"verification_uri_complete": "https://myna.test/oauth/device?user_code=ABCD-EFGH",
+			"expires_in":                600,
+			"interval":                  3,
+		})
+	}))
+	defer myna.Close()
+
+	a := testAuth(t)
+	a.cfg.issuer = myna.URL
+	for _, returnAfterAuthorization := range []bool{false, true} {
+		result, err := a.startDevice(context.Background(), returnAfterAuthorization)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["verification_uri_complete"] != "https://myna.test/oauth/device?user_code=ABCD-EFGH" || result["interval"] != 3 {
+			t.Fatalf("result = %#v", result)
+		}
+	}
+	if !reflect.DeepEqual(completionActions, []string{"", "return"}) {
+		t.Fatalf("completion actions = %q", completionActions)
+	}
+}
+
 func TestBooksAreSharedByCollaborators(t *testing.T) {
 	a := testAuth(t)
 	s := &server{auth: a, books: make(map[string]*bookRuntime), active: make(map[string]string)}

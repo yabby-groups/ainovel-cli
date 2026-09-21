@@ -165,7 +165,16 @@ func (s *server) authDevice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	result, err := s.auth.startDevice(r.Context())
+	var input struct {
+		ReturnAfterAuthorization bool `json:"return_after_authorization"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+	}
+	result, err := s.auth.startDevice(r.Context(), input.ReturnAfterAuthorization)
 	if err != nil {
 		writeJSONStatus(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
