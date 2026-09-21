@@ -201,6 +201,31 @@ type RunMeta struct {
 	AdvanceHold          *AdvanceHold       `json:"advance_hold,omitempty"`           // 当前干预签署的一次性暂停意图
 }
 
+// StopTargets 是用户设定的全书篇幅上限。任一非零目标达到时，在章节提交稳定后暂停；
+// 它不同于 TotalChapters，后者是大纲/上下文策略使用的内部容量。
+type StopTargets struct {
+	WordCount    int `json:"word_count,omitempty"`
+	ChapterCount int `json:"chapter_count,omitempty"`
+}
+
+func (t StopTargets) Validate() error {
+	if t.WordCount < 0 {
+		return fmt.Errorf("目标字数不能为负数")
+	}
+	if t.ChapterCount < 0 {
+		return fmt.Errorf("目标章节数不能为负数")
+	}
+	return nil
+}
+
+func (t StopTargets) Reached(progress *Progress) bool {
+	if progress == nil {
+		return false
+	}
+	return (t.WordCount > 0 && progress.TotalWordCount >= t.WordCount) ||
+		(t.ChapterCount > 0 && len(progress.CompletedChapters) >= t.ChapterCount)
+}
+
 // ChapterAdvanceMode 决定新章节是否需要逐章许可。
 type ChapterAdvanceMode string
 

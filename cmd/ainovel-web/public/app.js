@@ -154,6 +154,7 @@ async function resetBookViews() {
   await refreshStatus();
   await refreshModels();
   await refreshSnapshot();
+  await refreshStopTargets();
   await refreshChapters();
 }
 
@@ -184,6 +185,7 @@ function renderSnapshot(snap) {
       <div><span>书名</span><b>${escapeHtml(snap.BookTitle || '—')}</b></div>
       <div><span>模型</span><b>${escapeHtml(snap.ModelName)}</b></div>
       <div><span>进度</span><b>${snap.CompletedCount}/${snap.TotalChapters} 章 · ${snap.TotalWordCount} 字</b></div>
+      <div><span>停止条件</span><b>${snap.StopTargetWordCount ? `${snap.TotalWordCount}/${snap.StopTargetWordCount} 字` : '字数不限'} · ${snap.StopTargetChapterCount ? `${snap.CompletedCount}/${snap.StopTargetChapterCount} 章` : '章节不限'}</b></div>
       <div><span>当前</span><b>第${snap.CurrentChapter}章 · ${escapeHtml(snap.Phase)}</b></div>
       <div><span>验收</span><b>${escapeHtml(snap.AdvanceMode)}${snap.PendingRewrites && snap.PendingRewrites.length ? ' · 待重写 ' + snap.PendingRewrites.join(',') : ''}</b></div>
       <div><span>用量</span><b>${snap.TotalInputTokens} in / ${snap.TotalOutputTokens} out · $${Number(snap.TotalCostUSD || 0).toFixed(4)}</b></div>
@@ -199,6 +201,15 @@ function renderSnapshot(snap) {
 async function refreshSnapshot() {
   const res = await api('/api/snapshot');
   if (res.ok) renderSnapshot(res.data && res.data.data);
+}
+
+async function refreshStopTargets() {
+  const res = await api('/api/engine/stop-targets');
+  if (!res.ok) return;
+  const targets = res.data && res.data.data || {};
+  $('#stopWordCount').value = targets.word_count || '';
+  $('#stopChapterCount').value = targets.chapter_count || '';
+  $('#stopTargetsMsg').textContent = '';
 }
 
 async function refreshStatus() {
@@ -367,6 +378,7 @@ async function startWorkspace(user) {
   refreshStatus();
   refreshModels();
   refreshSnapshot();
+  refreshStopTargets();
   refreshChapters();
   connectSSE();
 
@@ -381,6 +393,17 @@ async function startWorkspace(user) {
   $('#roleSel').onchange = refreshModels;
   $('#providerSel').onchange = () => fillModelList($('#providerSel').value);
   $('#applyModel').onclick = applyModel;
+  $('#saveStopTargets').onclick = async () => {
+    const wordCount = Number($('#stopWordCount').value) || 0;
+    const chapterCount = Number($('#stopChapterCount').value) || 0;
+    const res = await api('/api/engine/stop-targets', 'PUT', { word_count: wordCount, chapter_count: chapterCount });
+    if (!res.ok) {
+      $('#stopTargetsMsg').textContent = '保存失败：' + res.error;
+      return;
+    }
+    $('#stopTargetsMsg').textContent = wordCount || chapterCount ? '已保存；任一条件达到后将在本章完成时暂停' : '已清除我的停止条件';
+    await refreshSnapshot();
+  };
 
   $('#start').onclick = async () => {
     const prompt = $('#prompt').value.trim();
@@ -554,7 +577,7 @@ function resumeLogin() {
 
 function wireGuestActions() {
   const selectors = [
-    '#createBook', '#applyModel', '#start', '#resume', '#cocreateOpen',
+    '#createBook', '#applyModel', '#saveStopTargets', '#start', '#resume', '#cocreateOpen',
     '#stageCocreate', '#steerBtn', '#continueBtn', '#reviewBtn', '#nextBtn', '#stopBtn',
     '#reopenBtn', '#importBtn', '#exportBtn', '#syncBtn', '#syncCheckBtn', '#diagBtn',
     '#simulateBtn', '#importsimBtn', '#cocreateSend', '#cocreateApply', '#cocreateCancel'

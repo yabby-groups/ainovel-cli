@@ -224,6 +224,72 @@ func TestChapterAdvanceGateStopsAfterTargetChapterCommit(t *testing.T) {
 	}
 }
 
+func TestChapterAdvanceGateStopsAtConfiguredWordOrChapterTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		targets domain.StopTargets
+		words   int
+		want    string
+	}{
+		{name: "word", targets: domain.StopTargets{WordCount: 1500}, words: 1000, want: "2000/1500 字"},
+		{name: "chapter", targets: domain.StopTargets{ChapterCount: 2}, words: 500, want: "2/2 章"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, gate, recorder := newAdvanceGateTest(t, domain.ChapterAdvanceAuto)
+			if err := gate.SetStopTargets(tc.targets); err != nil {
+				t.Fatal(err)
+			}
+			for chapter := 1; chapter <= 2; chapter++ {
+				if err := st.Progress.MarkChapterComplete(chapter, tc.words, "", ""); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.Checkpoints.Append(domain.ChapterScope(chapter), "commit", "", ""); err != nil {
+					t.Fatal(err)
+				}
+				stopped := gate.HandleBoundary()
+				if chapter == 1 && stopped {
+					t.Fatal("target should not stop before it is reached")
+				}
+				if chapter == 2 && !stopped {
+					t.Fatal("target should stop after stable matching commit")
+				}
+			}
+			if recorder.paused != 1 || len(recorder.reasons) == 0 || !strings.Contains(recorder.reasons[len(recorder.reasons)-1], tc.want) {
+				t.Fatalf("unexpected pause state: %+v", recorder)
+			}
+			if got := gate.StopTargets(); got != tc.targets {
+				t.Fatalf("configured targets must remain for a future resume: %+v", got)
+			}
+		})
+	}
+}
+
+func TestChapterAdvanceGateWaitsForConfiguredTargetCommitRecovery(t *testing.T) {
+	st, gate, recorder := newAdvanceGateTest(t, domain.ChapterAdvanceAuto)
+	if err := gate.SetStopTargets(domain.StopTargets{WordCount: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, 1000, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Signals.SavePendingCommit(domain.PendingCommit{Chapter: 1, Stage: domain.CommitStageProgressMarked}); err != nil {
+		t.Fatal(err)
+	}
+	if gate.HandleBoundary() || recorder.paused != 0 {
+		t.Fatal("pending commit must defer configured target pause")
+	}
+	if err := st.Signals.ClearPendingCommit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(1), "commit", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !gate.HandleBoundary() || recorder.paused != 1 {
+		t.Fatal("stable commit must trigger configured target pause")
+	}
+}
+
 func TestChapterAdvanceGateTargetHoldWaitsForCommitRecovery(t *testing.T) {
 	st, gate, recorder := newAdvanceGateTest(t, domain.ChapterAdvanceAuto)
 	hold := domain.AdvanceHold{After: domain.AdvanceHoldAtChapter, TargetChapter: 1, Reason: "写到第1章"}

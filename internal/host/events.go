@@ -48,31 +48,33 @@ func (e Event) hasLifecycle() bool {
 
 // UISnapshot 是 TUI 渲染所需的聚合状态快照。
 type UISnapshot struct {
-	Provider             string
-	BookTitle            string
-	ModelName            string
-	ModelContextWindow   int // 当前默认模型的上下文窗口（随 /model 切换实时解析）
-	ThinkingLevel        string
-	Style                string
-	RuntimeState         string // idle / running / pausing / paused / completed
-	StatusLabel          string
-	Phase                string
-	Flow                 string
-	CurrentChapter       int
-	TotalChapters        int
-	CompletedCount       int
-	TotalWordCount       int
-	InProgressChapter    int
-	PendingRewrites      []int
-	RewriteReason        string
-	PendingSteer         string
-	AdvanceMode          string
-	AdvancePermitChapter int
-	HasAdvanceHold       bool
-	AdvanceHoldReason    string
-	RecoveryLabel        string
-	IsRunning            bool
-	Agents               []AgentSnapshot
+	Provider               string
+	BookTitle              string
+	ModelName              string
+	ModelContextWindow     int // 当前默认模型的上下文窗口（随 /model 切换实时解析）
+	ThinkingLevel          string
+	Style                  string
+	RuntimeState           string // idle / running / pausing / paused / completed
+	StatusLabel            string
+	Phase                  string
+	Flow                   string
+	CurrentChapter         int
+	TotalChapters          int
+	CompletedCount         int
+	TotalWordCount         int
+	InProgressChapter      int
+	PendingRewrites        []int
+	RewriteReason          string
+	PendingSteer           string
+	AdvanceMode            string
+	AdvancePermitChapter   int
+	HasAdvanceHold         bool
+	AdvanceHoldReason      string
+	StopTargetWordCount    int
+	StopTargetChapterCount int
+	RecoveryLabel          string
+	IsRunning              bool
+	Agents                 []AgentSnapshot
 
 	// 累计用量（整个会话，跨所有 agent 与模型切换）
 	TotalInputTokens      int

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/voocel/ainovel-cli/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
@@ -123,6 +124,7 @@ func newAuthService(cfg authConfig) (*authService, error) {
 		CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
 		CREATE TABLE IF NOT EXISTS device_attempts (id TEXT PRIMARY KEY, device_code BLOB NOT NULL, user_code TEXT NOT NULL, verification_uri TEXT NOT NULL, expires_at INTEGER NOT NULL, next_poll_at INTEGER NOT NULL, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '');
 		CREATE TABLE IF NOT EXISTS preferences (user_id TEXT PRIMARY KEY, model TEXT NOT NULL, active_book TEXT NOT NULL DEFAULT 'default', updated_at INTEGER NOT NULL);
+		CREATE TABLE IF NOT EXISTS stop_targets (user_id TEXT NOT NULL, book_id TEXT NOT NULL, word_count INTEGER NOT NULL DEFAULT 0, chapter_count INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(user_id, book_id));
 		CREATE TABLE IF NOT EXISTS workspace_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);`); err != nil {
 		db.Close()
 		return nil, err
@@ -139,6 +141,23 @@ func newAuthService(cfg authConfig) (*authService, error) {
 		return nil, err
 	}
 	return &authService{cfg: cfg, db: db, http: &http.Client{Timeout: 15 * time.Second}, box: box}, nil
+}
+
+func (a *authService) stopTargets(ctx context.Context, userID, bookID string) (domain.StopTargets, error) {
+	var targets domain.StopTargets
+	err := a.db.QueryRowContext(ctx, `SELECT word_count,chapter_count FROM stop_targets WHERE user_id=? AND book_id=?`, userID, bookID).Scan(&targets.WordCount, &targets.ChapterCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.StopTargets{}, nil
+	}
+	return targets, err
+}
+
+func (a *authService) setStopTargets(ctx context.Context, userID, bookID string, targets domain.StopTargets) error {
+	if err := targets.Validate(); err != nil {
+		return err
+	}
+	_, err := a.db.ExecContext(ctx, `INSERT INTO stop_targets(user_id,book_id,word_count,chapter_count,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET word_count=excluded.word_count,chapter_count=excluded.chapter_count,updated_at=excluded.updated_at`, userID, bookID, targets.WordCount, targets.ChapterCount, time.Now().Unix())
+	return err
 }
 
 func (a *authService) seal(v []byte) ([]byte, error) {

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/voocel/ainovel-cli/internal/domain"
 )
 
 func testAuth(t *testing.T) *authService {
@@ -206,5 +208,30 @@ func TestCancelQueuedWriteOnlyRemovesCurrentUser(t *testing.T) {
 	queue := s.books[defaultBookID].queue
 	if len(queue) != 1 || queue[0].userID != "u3" {
 		t.Fatalf("queue = %#v", queue)
+	}
+}
+
+func TestStopTargetsAreScopedToUserAndBook(t *testing.T) {
+	a := testAuth(t)
+	ctx := context.Background()
+	one := domain.StopTargets{WordCount: 100000, ChapterCount: 100}
+	two := domain.StopTargets{WordCount: 200000, ChapterCount: 200}
+	if err := a.setStopTargets(ctx, "u1", "draft", one); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.setStopTargets(ctx, "u2", "draft", two); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.stopTargets(ctx, "u1", "draft")
+	if err != nil || got != one {
+		t.Fatalf("u1 draft targets = %+v, %v", got, err)
+	}
+	got, err = a.stopTargets(ctx, "u2", "draft")
+	if err != nil || got != two {
+		t.Fatalf("u2 draft targets = %+v, %v", got, err)
+	}
+	got, err = a.stopTargets(ctx, "u1", "other")
+	if err != nil || got != (domain.StopTargets{}) {
+		t.Fatalf("unset targets = %+v, %v", got, err)
 	}
 }

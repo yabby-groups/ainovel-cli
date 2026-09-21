@@ -3,6 +3,8 @@ package host
 import (
 	"fmt"
 	"slices"
+	"strings"
+	"sync"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/flow"
@@ -15,9 +17,29 @@ import (
 //
 // 它不参与 Route，不解释 Task/Reason，也不做文学判断。
 type ChapterAdvanceGate struct {
-	store  *store.Store
-	pause  func(reason string)
-	report func(level, summary string)
+	store    *store.Store
+	pause    func(reason string)
+	report   func(level, summary string)
+	targetMu sync.RWMutex
+	targets  domain.StopTargets
+}
+
+// SetStopTargets updates the current writer's user-scoped limits. Persistence
+// belongs to the caller because a shared novel may have multiple writers.
+func (g *ChapterAdvanceGate) SetStopTargets(targets domain.StopTargets) error {
+	if err := targets.Validate(); err != nil {
+		return err
+	}
+	g.targetMu.Lock()
+	g.targets = targets
+	g.targetMu.Unlock()
+	return nil
+}
+
+func (g *ChapterAdvanceGate) StopTargets() domain.StopTargets {
+	g.targetMu.RLock()
+	defer g.targetMu.RUnlock()
+	return g.targets
 }
 
 func NewChapterAdvanceGate(s *store.Store, pause func(reason string), report func(level, summary string)) *ChapterAdvanceGate {
@@ -43,6 +65,9 @@ func (g *ChapterAdvanceGate) HandleBoundary() bool {
 	if meta.AdvanceMode == domain.ChapterAdvanceAuto && meta.AdvancePermitChapter != 0 {
 		return g.fail(fmt.Errorf("auto 模式残留第 %d 章许可", meta.AdvancePermitChapter))
 	}
+	if g.handleStopTargets(g.StopTargets()) {
+		return true
+	}
 
 	if meta.AdvanceHold != nil {
 		if g.handleHold(*meta.AdvanceHold) {
@@ -54,6 +79,41 @@ func (g *ChapterAdvanceGate) HandleBoundary() bool {
 		return false
 	}
 	return g.reconcilePermit(meta.AdvancePermitChapter)
+}
+
+// handleStopTargets 在章节提交与 checkpoint 均稳定后暂停。目标是持久配置而非
+// 一次性 hold，故不消费；用户必须调高或清空目标后再继续。
+func (g *ChapterAdvanceGate) handleStopTargets(targets domain.StopTargets) bool {
+	if targets.WordCount == 0 && targets.ChapterCount == 0 {
+		return false
+	}
+	progress, err := g.store.Progress.Load()
+	if err != nil {
+		return g.fail(fmt.Errorf("读取 Progress 解析停止目标: %w", err))
+	}
+	if !targets.Reached(progress) {
+		return false
+	}
+	pending, err := g.store.Signals.LoadPendingCommit()
+	if err != nil {
+		return g.fail(fmt.Errorf("读取 PendingCommit 对账停止目标: %w", err))
+	}
+	if pending != nil {
+		return false
+	}
+	latest := progress.LatestCompleted()
+	if latest <= 0 || g.store.Checkpoints.LatestByStep(domain.ChapterScope(latest), "commit") == nil {
+		return g.fail(fmt.Errorf("停止目标已达到，但第 %d 章缺少稳定提交 checkpoint", latest))
+	}
+	parts := make([]string, 0, 2)
+	if targets.WordCount > 0 && progress.TotalWordCount >= targets.WordCount {
+		parts = append(parts, fmt.Sprintf("累计 %d/%d 字", progress.TotalWordCount, targets.WordCount))
+	}
+	if targets.ChapterCount > 0 && len(progress.CompletedChapters) >= targets.ChapterCount {
+		parts = append(parts, fmt.Sprintf("已完成 %d/%d 章", len(progress.CompletedChapters), targets.ChapterCount))
+	}
+	g.pauseNow("已达到用户设定的停止目标（" + strings.Join(parts, "；") + "），已暂停；调整目标后可继续创作")
+	return true
 }
 
 func (g *ChapterAdvanceGate) handleHold(hold domain.AdvanceHold) bool {

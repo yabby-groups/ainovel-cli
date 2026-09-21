@@ -132,6 +132,7 @@ func main() {
 	handle("/api/engine/continue", s.engineContinue)
 	handle("/api/engine/review", s.engineReview)
 	handle("/api/engine/next", s.engineNext)
+	handle("/api/engine/stop-targets", s.engineStopTargets)
 	handle("/api/engine/stop", s.engineStop)
 	handle("/api/engine/reopen", s.engineReopen)
 	handle("/api/engine/export", s.engineExport)
@@ -502,11 +503,26 @@ func (s *server) ensureBookLocked(ctx context.Context, userID, id string) (*book
 	if err != nil {
 		return nil, err
 	}
+	targets, err := s.auth.stopTargets(ctx, userID, id)
+	if err != nil {
+		eng.Close()
+		return nil, fmt.Errorf("load user stop targets: %w", err)
+	}
+	if err := eng.SetStopTargets(targets); err != nil {
+		eng.Close()
+		return nil, fmt.Errorf("apply user stop targets: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	rt := &bookRuntime{userID: userID, id: id, engine: eng, cancel: cancel}
 	s.books[key] = rt
 	go s.pump(ctx, userID, id, eng)
 	return rt, nil
+}
+
+func (s *server) activeBookForUser(ctx context.Context, userID string) string {
+	s.bookMu.Lock()
+	defer s.bookMu.Unlock()
+	return s.loadActiveBookLocked(ctx, userID)
 }
 
 func (s *server) teardownBookLocked(userID, id string) {
@@ -885,7 +901,23 @@ func (s *server) cancelQueuedWrite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "cancelled": false})
 }
 func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
-	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) { return h.Snapshot(), nil })
+	u, err := userFrom(r)
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+	bookID := s.activeBookForUser(r.Context(), u.ID)
+	targets, err := s.auth.stopTargets(r.Context(), u.ID, bookID)
+	if err != nil {
+		http.Error(w, "read stop targets: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
+		snap := h.Snapshot()
+		snap.StopTargetWordCount = targets.WordCount
+		snap.StopTargetChapterCount = targets.ChapterCount
+		return snap, nil
+	})
 }
 
 func (s *server) engineModels(w http.ResponseWriter, r *http.Request) {
@@ -1009,6 +1041,51 @@ func (s *server) engineReview(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) engineNext(w http.ResponseWriter, r *http.Request) {
 	s.withWritingEngine(w, r, "放行下一章", func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.AdvanceOneChapter() })
+}
+
+func (s *server) engineStopTargets(w http.ResponseWriter, r *http.Request) {
+	u, err := userFrom(r)
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+	bookID := s.activeBookForUser(r.Context(), u.ID)
+	switch r.Method {
+	case http.MethodGet:
+		targets, err := s.auth.stopTargets(r.Context(), u.ID, bookID)
+		if err != nil {
+			http.Error(w, "read stop targets: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "data": targets})
+	case http.MethodPut:
+		var input domain.StopTargets
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if err := input.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.auth.setStopTargets(r.Context(), u.ID, bookID, input); err != nil {
+			http.Error(w, "save stop targets: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.bookMu.Lock()
+		rt := s.books[s.bookKey("", bookID)]
+		if rt != nil && rt.userID == u.ID && rt.engine != nil {
+			err = rt.engine.SetStopTargets(input)
+		}
+		s.bookMu.Unlock()
+		if err != nil {
+			http.Error(w, "apply stop targets: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "data": input})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *server) engineStop(w http.ResponseWriter, r *http.Request) {

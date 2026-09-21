@@ -798,6 +798,11 @@ func (h *Host) SetAdvanceMode(mode domain.ChapterAdvanceMode) error {
 	return nil
 }
 
+// SetStopTargets 保存用户设定的总字数/章节安全暂停目标，不会中断正在生成的章节。
+func (h *Host) SetStopTargets(targets domain.StopTargets) error {
+	return h.gate.SetStopTargets(targets)
+}
+
 // AdvanceOneChapter 在逐章验收模式下授权一个精确章节并启动 Engine。
 func (h *Host) AdvanceOneChapter() error {
 	h.interMu.Lock()
@@ -1225,6 +1230,9 @@ func (h *Host) Snapshot() UISnapshot {
 			snap.AdvanceHoldReason = meta.AdvanceHold.Reason
 		}
 	}
+	targets := h.gate.StopTargets()
+	snap.StopTargetWordCount = targets.WordCount
+	snap.StopTargetChapterCount = targets.ChapterCount
 
 	snap.Agents = h.observer.agentSnapshots()
 	snap.StatusLabel = deriveStatusLabel(snap)
