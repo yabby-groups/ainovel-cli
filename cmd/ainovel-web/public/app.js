@@ -510,21 +510,32 @@ async function startWorkspace(user) {
 }
 
 async function beginLogin() {
-  // Open synchronously so browser popup protection does not block the authorization tab.
-  const loginWindow = window.open('', '_blank');
-  if (!loginWindow) {
-    showApiToast('浏览器阻止了登录页面，请允许弹出窗口后重试。', true);
-    return;
+  // WeChat's embedded browser can leave an asynchronously navigated popup blank.
+  // It uses this tab and resumes polling when the user returns after authorization.
+  const inWeChat = /MicroMessenger/i.test(navigator.userAgent);
+  let loginWindow = null;
+  if (!inWeChat) {
+    // Open synchronously so browser popup protection does not block the authorization tab.
+    loginWindow = window.open('', '_blank');
+    if (!loginWindow) {
+      showApiToast('浏览器阻止了登录页面，请允许弹出窗口后重试。', true);
+      return;
+    }
   }
   const res = await api('/api/auth/device', 'POST');
   if (!res.ok) {
-    loginWindow.close();
+    if (loginWindow) loginWindow.close();
     return;
   }
   const d = res.data;
   sessionStorage.setItem('ainovel-device-login', JSON.stringify({ id: d.id, interval: d.interval }));
-  loginWindow.opener = null;
-  loginWindow.location.replace(d.verification_uri_complete || d.verification_uri);
+  const authorizationURL = d.verification_uri_complete || d.verification_uri;
+  if (inWeChat) {
+    showApiToast('正在打开微信授权，完成后请返回本页。');
+    window.location.assign(authorizationURL);
+    return;
+  }
+  loginWindow.location.replace(authorizationURL);
   resumeLogin();
 }
 
