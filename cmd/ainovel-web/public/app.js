@@ -339,6 +339,11 @@ async function init() {
 
 async function startWorkspace(user) {
   $('#workspace').hidden = false;
+  const chapterDialog = $('#chapterDialog');
+  $('#close').onclick = () => chapterDialog.close();
+  chapterDialog.onclick = event => {
+    if (event.target === chapterDialog) chapterDialog.close();
+  };
   const guest = !user;
   $('#accountName').textContent = guest ? '访客' : (user.name || user.id);
   $('#logout').hidden = guest;
@@ -370,7 +375,6 @@ async function startWorkspace(user) {
     const res = await api('/api/books/queue/cancel', 'POST');
     if (res.ok) await loadBooks();
   };
-  $('#close').onclick = () => $('#chapterDialog').close();
   $('#bookSelect').onchange = switchBook;
   $('#switchBook').onclick = switchBook;
   $('#createBook').onclick = createBook;
