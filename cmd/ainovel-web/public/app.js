@@ -28,7 +28,7 @@ async function api(path, method = 'GET', body) {
     showApiToast(`[API ${r.status}] ${path}\n${error}`, true);
     return { ok: false, error };
   }
-  if (method !== 'GET') showApiToast(`[API ${r.status}] ${path}\n${apiResultText(data)}`);
+  // if (method !== 'GET') showApiToast(`[API ${r.status}] ${path}\n${apiResultText(data)}`);
   return { ok: true, data };
 }
 
