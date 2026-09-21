@@ -3,7 +3,6 @@ const events = [];
 let streamBuffer = '';
 let modelData = null;
 let currentBookId = 'default';
-let configProviders = {};
 let bookSwitchPromise = Promise.resolve();
 
 function escapeHtml(v) {
@@ -196,75 +195,22 @@ async function refreshModels() {
   const role = $('#roleSel').value;
   const roleInfo = modelData.roles[role] || {};
   if (roleInfo.provider) providerSel.value = roleInfo.provider;
-  $('#modelInput').value = roleInfo.model || '';
+  fillModelList(providerSel.value, roleInfo.model || '');
   fillThinking(roleInfo);
-  fillModelList(providerSel.value);
 }
 
-function fillModelList(provider) {
-  const list = $('#modelList');
+function fillModelList(provider, preferredModel = '') {
+  const list = $('#modelInput');
   const models = (modelData && modelData.provider_models && modelData.provider_models[provider]) || [];
-  list.innerHTML = models.map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+  const selected = preferredModel || list.value;
+  list.innerHTML = models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+  list.value = models.includes(selected) ? selected : (models[0] || '');
 }
 
 function fillThinking(roleInfo) {
   const sel = $('#thinkingSel');
   const levels = roleInfo.available_thinking || [];
   sel.innerHTML = levels.map(l => `<option value="${escapeHtml(l)}" ${l === roleInfo.thinking ? 'selected' : ''}>${escapeHtml(l || 'auto')}</option>`).join('');
-}
-
-async function loadConfig() {
-  const res = await api('/api/config');
-  if (!res.ok) return;
-  const c = res.data;
-  configProviders = c.provider_configs || {};
-  $('#cfgProvider').innerHTML = Object.keys(configProviders).map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
-  $('#cfgProvider').value = c.provider || '';
-  $('#cfgModels').value = (c.models || []).join('\n');
-  fillConfigModels(c.models || [], c.model || '');
-  $('#cfgBaseUrl').value = c.base_url || '';
-  $('#cfgApiKey').placeholder = c.api_key_set ? `已配置（${c.api_key_masked}，留空保持不变）` : 'sk-...';
-  $('#configPath').textContent = c.path || '';
-}
-
-function fillConfigModels(models, selected) {
-  const names = [...new Set((models || []).map(v => String(v).trim()).filter(Boolean))];
-  if (selected && !names.includes(selected)) names.unshift(selected);
-  $('#cfgModel').innerHTML = names.length
-    ? names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')
-    : '<option value="">请先添加模型</option>';
-  $('#cfgModel').value = selected || names[0] || '';
-}
-
-function selectConfigProvider(provider) {
-  const info = configProviders[provider] || {};
-  $('#cfgModels').value = (info.models || []).join('\n');
-  fillConfigModels(info.models || [], '');
-  $('#cfgBaseUrl').value = info.base_url || '';
-  $('#cfgApiKey').value = '';
-  $('#cfgApiKey').placeholder = info.api_key_set ? `已配置（${info.api_key_masked}，留空保持不变）` : 'sk-...';
-}
-
-async function saveConfig() {
-  const msg = $('#configMsg');
-  msg.textContent = '保存中…';
-  const res = await api('/api/config', 'POST', {
-    provider: $('#cfgProvider').value.trim(),
-    api_key: $('#cfgApiKey').value.trim(),
-    base_url: $('#cfgBaseUrl').value.trim(),
-    model: $('#cfgModel').value.trim(),
-    models: $('#cfgModels').value.split(/\r?\n/).map(v => v.trim()).filter(Boolean)
-  });
-  if (res.ok) {
-    msg.textContent = res.data.engine_ready ? `已保存，引擎已就绪：${res.data.path}` : `已保存，但引擎未就绪：${res.data.engine_error || ''}`;
-    $('#cfgApiKey').value = '';
-    loadConfig();
-    refreshStatus();
-    refreshModels();
-    refreshSnapshot();
-  } else {
-    msg.textContent = '保存失败：' + res.error;
-  }
 }
 
 function connectSSE() {
@@ -335,17 +281,42 @@ function wireCocreate(stage) {
 }
 
 async function init() {
+  let me = null;
+  try {
+    const response = await fetch('/api/auth/me');
+    if (response.ok) me = await response.json();
+  } catch (_) {}
+  if (!me || !me.authenticated) {
+    await startWorkspace(null);
+    resumeLogin();
+    return;
+  }
+  await startWorkspace(me.user);
+}
+
+async function startWorkspace(user) {
+  $('#workspace').hidden = false;
+  const guest = !user;
+  $('#accountName').textContent = guest ? '访客' : (user.name || user.id);
+  $('#logout').hidden = guest;
+  $('#loginTop').hidden = !guest;
+  $('#loginTop').onclick = beginLogin;
+  $('#logout').onclick = logout;
+  if (guest) {
+    setStatus('访客模式');
+    renderBooks({ active: currentBookId, books: [{ id: currentBookId, title: currentBookId, active: true }] });
+    await refreshChapters();
+    connectSSE();
+    wireGuestActions();
+    return;
+  }
   await loadBooks();
-  loadConfig();
   refreshStatus();
   refreshModels();
   refreshSnapshot();
   refreshChapters();
   connectSSE();
 
-  $('#saveConfig').onclick = saveConfig;
-  $('#cfgProvider').onchange = () => selectConfigProvider($('#cfgProvider').value);
-  $('#cfgModels').oninput = () => fillConfigModels($('#cfgModels').value.split(/\r?\n/), $('#cfgModel').value);
   $('#refresh').onclick = refreshChapters;
   $('#close').onclick = () => $('#chapterDialog').close();
   $('#bookSelect').onchange = switchBook;
@@ -480,6 +451,58 @@ async function init() {
     await api('/api/engine/cocreate/cancel', 'POST');
     $('#cocreatePanel').hidden = true;
   };
+}
+
+async function beginLogin() {
+  // Open synchronously so browser popup protection does not block the authorization tab.
+  const loginWindow = window.open('', '_blank');
+  if (!loginWindow) {
+    showApiToast('浏览器阻止了登录页面，请允许弹出窗口后重试。', true);
+    return;
+  }
+  const res = await api('/api/auth/device', 'POST');
+  if (!res.ok) {
+    loginWindow.close();
+    return;
+  }
+  const d = res.data;
+  sessionStorage.setItem('ainovel-device-login', JSON.stringify({ id: d.id, interval: d.interval }));
+  loginWindow.opener = null;
+  loginWindow.location.replace(d.verification_uri_complete || d.verification_uri);
+  resumeLogin();
+}
+
+function resumeLogin() {
+  let attempt;
+  try { attempt = JSON.parse(sessionStorage.getItem('ainovel-device-login')); } catch (_) {}
+  if (!attempt || !attempt.id) return;
+  const delay = Math.max(3000, Number(attempt.interval || 3) * 1000);
+  const poll = async () => {
+    const status = await api('/api/auth/device/' + encodeURIComponent(attempt.id), 'POST');
+    if (!status.ok) { sessionStorage.removeItem('ainovel-device-login'); return; }
+    if (status.data.status === 'authorization_pending' || status.data.status === 'slow_down') { setTimeout(poll, status.data.status === 'slow_down' ? delay + 5000 : delay); return; }
+    if (status.data.status === 'approved') {
+      sessionStorage.removeItem('ainovel-device-login');
+      window.location.reload();
+    }
+  };
+  setTimeout(poll, delay);
+}
+
+function wireGuestActions() {
+  const selectors = [
+    '#createBook', '#switchBook', '#applyModel', '#start', '#resume', '#cocreateOpen',
+    '#stageCocreate', '#steerBtn', '#continueBtn', '#reviewBtn', '#nextBtn', '#stopBtn',
+    '#reopenBtn', '#importBtn', '#exportBtn', '#syncBtn', '#syncCheckBtn', '#diagBtn',
+    '#simulateBtn', '#importsimBtn', '#cocreateSend', '#cocreateApply', '#cocreateCancel'
+  ];
+  for (const selector of selectors) $(selector).onclick = beginLogin;
+}
+
+async function logout() {
+  const res = await api('/api/auth/logout', 'POST');
+  if (!res.ok) return;
+  window.location.reload();
 }
 
 init();

@@ -9,9 +9,9 @@
 <body>
 <header>
   <div class="brand"><span>AN</span><strong>AI Novel Studio</strong></div>
-  <div id="status" class="status">就绪</div>
+  <div class="account"><div id="status" class="status">浏览模式</div><span id="accountName"></span><button id="loginTop" class="quiet">登录后共写</button><button id="logout" class="quiet" hidden>退出</button></div>
 </header>
-<main>
+<main id="workspace" hidden>
   <section class="panel bookshelf">
     <div class="panel-head"><div><p class="kicker">BOOKSHELF</p><h2>Books</h2></div><span id="bookMsg"></span></div>
     <div class="bookshelf-bar">
@@ -20,18 +20,6 @@
       <button id="createBook">New</button>
       <button id="switchBook" class="quiet">Switch</button>
     </div>
-  </section>
-
-  <section class="panel settings">
-    <div class="panel-head"><div><p class="kicker">ENGINE SETTINGS</p><h2>模型配置</h2></div><span id="configPath" class="path"></span></div>
-    <div class="settings-grid">
-      <label>Provider<select id="cfgProvider"></select></label>
-      <label>API Key<input id="cfgApiKey" type="password" placeholder="sk-..." autocomplete="off"></label>
-      <label>Base URL<input id="cfgBaseUrl" placeholder="https://openrouter.ai/api/v1"></label>
-      <label>默认 Model<select id="cfgModel"></select></label>
-      <label style="grid-column:1/-1">模型列表<textarea id="cfgModels" class="models-editor" style="width:100%;min-height:110px;margin:0" placeholder="每行一个模型 ID"></textarea></label>
-    </div>
-    <div class="settings-foot"><button id="saveConfig" class="quiet">保存配置</button><span id="configMsg"></span></div>
   </section>
 
   <div class="two-col">
@@ -46,7 +34,7 @@
             <option value="editor">Editor</option>
           </select></label>
           <label>Provider<select id="providerSel"></select></label>
-          <label>Model<input id="modelInput" list="modelList" placeholder="模型名"><datalist id="modelList"></datalist></label>
+          <label>Model<select id="modelInput"></select></label>
           <label>推理强度<select id="thinkingSel"></select></label>
           <button id="applyModel">应用模型</button>
         </div>

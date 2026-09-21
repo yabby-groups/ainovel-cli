@@ -41,6 +41,7 @@ type cocreateState struct {
 }
 
 type bookRuntime struct {
+	userID   string
 	id       string
 	engine   *host.Host
 	cancel   context.CancelFunc
@@ -57,13 +58,19 @@ type bookInfo struct {
 }
 
 type server struct {
+	auth    *authService
 	mu      sync.Mutex
-	log     []string
-	clients map[chan string]struct{}
+	log     []userEvent
+	clients map[chan string]string
 
 	bookMu sync.Mutex
 	books  map[string]*bookRuntime
-	active string
+	active map[string]string
+}
+
+type userEvent struct {
+	userID  string
+	payload string
 }
 
 const stageCoCreateOpener = "我先暂停一下，想和你一起规划接下来的走向。"
@@ -74,72 +81,173 @@ const (
 )
 
 func main() {
-	s := &server{clients: make(map[chan string]struct{}), books: make(map[string]*bookRuntime), active: defaultBookID}
-	if err := s.reloadAllBooks(); err != nil {
-		fmt.Fprintf(os.Stderr, "engine not ready: %v\n", err)
+	authCfg, err := loadAuthConfig()
+	if err != nil {
+		panic("ainovel-web configuration: " + err.Error())
 	}
+	auth, err := newAuthService(authCfg)
+	if err != nil {
+		panic("ainovel-web storage: " + err.Error())
+	}
+	defer auth.close()
+	s := &server{auth: auth, clients: make(map[chan string]string), books: make(map[string]*bookRuntime), active: make(map[string]string)}
 
 	static, _ := fs.Sub(publicFS, "public")
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(static)))
+	mux.HandleFunc("/api/auth/device", s.authDevice)
+	mux.HandleFunc("/api/auth/device/", s.authDeviceStatus)
+	mux.HandleFunc("/api/auth/me", s.authMe)
+	mux.HandleFunc("/api/auth/logout", s.authLogout)
+	handle := func(pattern string, handler http.HandlerFunc) { mux.Handle(pattern, auth.require(handler)) }
 	mux.HandleFunc("/api/status", s.status)
 	mux.HandleFunc("/api/chapters", s.chapters)
 	mux.HandleFunc("/api/events", s.events)
-	mux.HandleFunc("/api/config", s.config)
-	mux.HandleFunc("/api/snapshot", s.snapshot)
-	mux.HandleFunc("/api/generate", s.engineStart)
-	mux.HandleFunc("/api/engine/models", s.engineModels)
-	mux.HandleFunc("/api/engine/start", s.engineStart)
-	mux.HandleFunc("/api/engine/resume", s.engineResume)
-	mux.HandleFunc("/api/engine/steer", s.engineSteer)
-	mux.HandleFunc("/api/engine/continue", s.engineContinue)
-	mux.HandleFunc("/api/engine/review", s.engineReview)
-	mux.HandleFunc("/api/engine/next", s.engineNext)
-	mux.HandleFunc("/api/engine/stop", s.engineStop)
-	mux.HandleFunc("/api/engine/reopen", s.engineReopen)
-	mux.HandleFunc("/api/engine/export", s.engineExport)
-	mux.HandleFunc("/api/engine/import", s.engineImport)
-	mux.HandleFunc("/api/engine/simulate", s.engineSimulate)
-	mux.HandleFunc("/api/engine/importsim", s.engineImportSim)
-	mux.HandleFunc("/api/engine/sync", s.engineSync)
-	mux.HandleFunc("/api/engine/diag", s.engineDiag)
-	mux.HandleFunc("/api/engine/model", s.engineModel)
-	mux.HandleFunc("/api/engine/thinking", s.engineThinking)
-	mux.HandleFunc("/api/engine/cocreate/start", s.cocreateStart)
-	mux.HandleFunc("/api/engine/cocreate/send", s.cocreateSend)
-	mux.HandleFunc("/api/engine/cocreate/apply", s.cocreateApply)
-	mux.HandleFunc("/api/engine/cocreate/cancel", s.cocreateCancel)
-	mux.HandleFunc("/api/books", s.handleBooks)
-	mux.HandleFunc("/api/books/switch", s.booksSwitch)
+	handle("/api/snapshot", s.snapshot)
+	handle("/api/generate", s.engineStart)
+	handle("/api/engine/models", s.engineModels)
+	handle("/api/engine/start", s.engineStart)
+	handle("/api/engine/resume", s.engineResume)
+	handle("/api/engine/steer", s.engineSteer)
+	handle("/api/engine/continue", s.engineContinue)
+	handle("/api/engine/review", s.engineReview)
+	handle("/api/engine/next", s.engineNext)
+	handle("/api/engine/stop", s.engineStop)
+	handle("/api/engine/reopen", s.engineReopen)
+	handle("/api/engine/export", s.engineExport)
+	handle("/api/engine/import", s.engineImport)
+	handle("/api/engine/simulate", s.engineSimulate)
+	handle("/api/engine/importsim", s.engineImportSim)
+	handle("/api/engine/sync", s.engineSync)
+	handle("/api/engine/diag", s.engineDiag)
+	handle("/api/engine/model", s.engineModel)
+	handle("/api/engine/thinking", s.engineThinking)
+	handle("/api/engine/cocreate/start", s.cocreateStart)
+	handle("/api/engine/cocreate/send", s.cocreateSend)
+	handle("/api/engine/cocreate/apply", s.cocreateApply)
+	handle("/api/engine/cocreate/cancel", s.cocreateCancel)
+	handle("/api/books", s.handleBooks)
+	handle("/api/books/switch", s.booksSwitch)
 
-	port := os.Getenv("AINOVEL_WEB_PORT")
-	if port == "" {
-		port = "4788"
+	addr := os.Getenv("AINOVEL_WEB_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:4788"
 	}
-	fmt.Printf("ainovel-web: http://127.0.0.1:%s\n", port)
-	if err := http.ListenAndServe("127.0.0.1:"+port, mux); err != nil {
+	fmt.Printf("ainovel-web: http://%s\n", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		panic(err)
 	}
 }
 
-func (s *server) status(w http.ResponseWriter, _ *http.Request) {
+func (s *server) authDevice(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	result, err := s.auth.startDevice(r.Context())
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (s *server) authDeviceStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/auth/device/")
+	if id == "" || strings.Contains(id, "/") {
+		http.Error(w, "invalid authorization attempt", http.StatusBadRequest)
+		return
+	}
+	user, err := s.auth.pollDevice(r.Context(), id)
+	if err != nil {
+		if err.Error() == "authorization_pending" || err.Error() == "slow_down" {
+			writeJSON(w, map[string]any{"status": err.Error()})
+			return
+		}
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	token, err := s.auth.createSession(r.Context(), user)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "could not create session"})
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.auth.cfg.secureCookie, MaxAge: 30 * 24 * 60 * 60})
+	writeJSON(w, map[string]any{"status": "approved", "user": map[string]string{"id": user.ID, "name": user.Name}})
+}
+
+func (s *server) authMe(w http.ResponseWriter, r *http.Request) {
+	u, err := s.auth.currentUser(r)
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"authenticated": false})
+		return
+	}
+	writeJSON(w, map[string]any{"authenticated": true, "user": map[string]string{"id": u.ID, "name": u.Name}})
+}
+
+func (s *server) authLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if u, err := s.auth.currentUser(r); err == nil {
+		s.bookMu.Lock()
+		for key, runtime := range s.books {
+			if runtime.userID == u.ID {
+				if runtime.cancel != nil {
+					runtime.cancel()
+				}
+				if runtime.engine != nil {
+					runtime.engine.Close()
+				}
+				delete(s.books, key)
+			}
+		}
+		delete(s.active, u.ID)
+		s.bookMu.Unlock()
+	}
+	s.auth.logout(r.Context(), r)
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1, Secure: s.auth.cfg.secureCookie, SameSite: http.SameSiteLaxMode})
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *server) status(w http.ResponseWriter, r *http.Request) {
+	u, err := s.auth.currentUser(r)
+	if err != nil {
+		writeJSON(w, map[string]any{"configured": false, "events": 0, "active": defaultBookID})
+		return
+	}
 	s.bookMu.Lock()
-	rt := s.books[s.active]
+	active := s.loadActiveBookLocked(r.Context(), u.ID)
+	rt := s.books[s.bookKey(u.ID, active)]
 	configured := rt != nil && rt.engine != nil
 	dir := ""
 	if configured {
-		dir = rt.engine.Dir()
+		dir = "ready"
 	}
-	active := s.active
 	s.bookMu.Unlock()
 
 	s.mu.Lock()
-	n := len(s.log)
+	n := 0
+	for _, event := range s.log {
+		if event.userID == u.ID {
+			n++
+		}
+	}
 	s.mu.Unlock()
 	writeJSON(w, map[string]any{"configured": configured, "dir": dir, "events": n, "active": active})
 }
 
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
+	u, err := s.auth.currentUser(r)
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -151,9 +259,11 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan string, 64)
 	s.mu.Lock()
 	for _, event := range s.log {
-		fmt.Fprintf(w, "data: %s\n\n", event)
+		if event.userID == u.ID {
+			fmt.Fprintf(w, "data: %s\n\n", event.payload)
+		}
 	}
-	s.clients[ch] = struct{}{}
+	s.clients[ch] = u.ID
 	s.mu.Unlock()
 	flusher.Flush()
 	defer func() { s.mu.Lock(); delete(s.clients, ch); s.mu.Unlock() }()
@@ -168,22 +278,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) broadcast(event string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.log = append(s.log, event)
-	if len(s.log) > 300 {
-		s.log = s.log[len(s.log)-300:]
-	}
-	for ch := range s.clients {
-		select {
-		case ch <- event:
-		default:
-		}
-	}
-}
-
-func (s *server) broadcastTyped(bookID, typ string, data any) {
+func (s *server) broadcastTyped(userID, bookID, typ string, data any) {
 	payload := map[string]any{"type": typ, "book": bookID}
 	if data != nil {
 		payload["data"] = data
@@ -192,10 +287,24 @@ func (s *server) broadcastTyped(bookID, typ string, data any) {
 	if err != nil {
 		return
 	}
-	s.broadcast(string(b))
+	s.mu.Lock()
+	s.log = append(s.log, userEvent{userID: userID, payload: string(b)})
+	if len(s.log) > 300 {
+		s.log = s.log[len(s.log)-300:]
+	}
+	for ch, clientUserID := range s.clients {
+		if clientUserID != userID {
+			continue
+		}
+		select {
+		case ch <- string(b):
+		default:
+		}
+	}
+	s.mu.Unlock()
 }
 
-func (s *server) pump(ctx context.Context, bookID string, h *host.Host) {
+func (s *server) pump(ctx context.Context, userID, bookID string, h *host.Host) {
 	events := h.Events()
 	stream := h.Stream()
 	done := h.Done()
@@ -207,40 +316,94 @@ func (s *server) pump(ctx context.Context, bookID string, h *host.Host) {
 			if !ok {
 				events = nil
 			} else {
-				s.broadcastTyped(bookID, "event", ev)
+				s.broadcastTyped(userID, bookID, "event", ev)
 			}
 		case delta, ok := <-stream:
 			if !ok {
 				stream = nil
 			} else if delta == host.StreamClearSentinel {
-				s.broadcastTyped(bookID, "clear", nil)
+				s.broadcastTyped(userID, bookID, "clear", nil)
 			} else {
-				s.broadcastTyped(bookID, "stream", delta)
+				s.broadcastTyped(userID, bookID, "stream", delta)
 			}
 		case _, ok := <-done:
 			if !ok {
 				done = nil
 			} else {
-				s.broadcastTyped(bookID, "done", nil)
+				s.broadcastTyped(userID, bookID, "done", nil)
 			}
 		}
 	}
 }
 
-func (s *server) currentConfig() (bootstrap.Config, error) {
-	cfg, err := bootstrap.LoadConfig()
+func (s *server) currentConfig(ctx context.Context, userID string) (bootstrap.Config, error) {
+	cred, err := s.auth.credential(ctx, userID)
 	if err != nil {
-		return cfg, err
+		return bootstrap.Config{}, fmt.Errorf("read user credential: %w", err)
 	}
+	availableModels, err := s.auth.models(ctx, userID)
+	if err != nil {
+		return bootstrap.Config{}, fmt.Errorf("load Myna models: %w", err)
+	}
+	model := "gpt-5.6-luna"
+	models := make([]bootstrap.ModelConfig, 0, len(availableModels))
+	for _, name := range availableModels {
+		models = append(models, bootstrap.ModelConfig{Name: name})
+	}
+	if !containsModel(availableModels, model) {
+		model = availableModels[0]
+	}
+	cfg := bootstrap.Config{Provider: "myna", ModelName: model, Style: "default", Providers: map[string]bootstrap.ProviderConfig{"myna": {Type: "openai", APIKey: cred.APIKey, BaseURL: s.auth.cfg.apiBase, Models: models}}, Roles: map[string]bootstrap.RoleConfig{}}
 	cfg.FillDefaults()
 	return cfg, nil
 }
 
-func (s *server) bookDirForID(id string) string {
-	if id == defaultBookID {
-		return filepath.Join("output", "novel")
+func containsModel(models []string, target string) bool {
+	for _, model := range models {
+		if model == target {
+			return true
+		}
 	}
-	return filepath.Join(booksDirName, id, "output", "novel")
+	return false
+}
+
+func (s *server) bookKey(userID, id string) string { return userID + "\x00" + id }
+func (s *server) activeBook(userID string) string {
+	if id := s.active[userID]; id != "" {
+		return id
+	}
+	return defaultBookID
+}
+
+func (s *server) loadActiveBookLocked(ctx context.Context, userID string) string {
+	if id := s.active[userID]; id != "" {
+		return id
+	}
+	var id string
+	_ = s.auth.db.QueryRowContext(ctx, `SELECT active_book FROM preferences WHERE user_id=?`, userID).Scan(&id)
+	if strings.TrimSpace(id) == "" {
+		id = defaultBookID
+	}
+	for _, candidate := range s.discoverBookIDsLocked(userID) {
+		if candidate == id {
+			s.active[userID] = id
+			return id
+		}
+	}
+	s.active[userID] = defaultBookID
+	return defaultBookID
+}
+
+func (s *server) saveActiveBook(ctx context.Context, userID, bookID string) {
+	_, _ = s.auth.db.ExecContext(ctx, `UPDATE preferences SET active_book=?,updated_at=? WHERE user_id=?`, bookID, time.Now().Unix(), userID)
+}
+
+func (s *server) bookDirForID(userID, id string) string {
+	safeUserID, err := safeBookID(userID)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(s.auth.cfg.dataDir, "users", safeUserID, "books", id, "output", "novel")
 }
 
 func safeBookID(name string) (string, error) {
@@ -268,9 +431,13 @@ func safeBookID(name string) (string, error) {
 	return id, nil
 }
 
-func (s *server) discoverBookIDsLocked() []string {
+func (s *server) discoverBookIDsLocked(userID string) []string {
 	ids := []string{defaultBookID}
-	entries, err := os.ReadDir(booksDirName)
+	safeUserID, err := safeBookID(userID)
+	if err != nil {
+		return ids
+	}
+	entries, err := os.ReadDir(filepath.Join(s.auth.cfg.dataDir, "users", safeUserID, "books"))
 	if err == nil {
 		for _, entry := range entries {
 			if entry.IsDir() && entry.Name() != defaultBookID {
@@ -282,18 +449,19 @@ func (s *server) discoverBookIDsLocked() []string {
 	return ids
 }
 
-func (s *server) ensureBookLocked(id string) (*bookRuntime, error) {
-	if rt, ok := s.books[id]; ok {
+func (s *server) ensureBookLocked(ctx context.Context, userID, id string) (*bookRuntime, error) {
+	key := s.bookKey(userID, id)
+	if rt, ok := s.books[key]; ok {
 		return rt, nil
 	}
-	cfg, err := s.currentConfig()
+	cfg, err := s.currentConfig(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 	if err := cfg.ValidateBase(); err != nil {
 		return nil, err
 	}
-	cfg.OutputDir = s.bookDirForID(id)
+	cfg.OutputDir = s.bookDirForID(userID, id)
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -303,14 +471,15 @@ func (s *server) ensureBookLocked(id string) (*bookRuntime, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	rt := &bookRuntime{id: id, engine: eng, cancel: cancel}
-	s.books[id] = rt
-	go s.pump(ctx, id, eng)
+	rt := &bookRuntime{userID: userID, id: id, engine: eng, cancel: cancel}
+	s.books[key] = rt
+	go s.pump(ctx, userID, id, eng)
 	return rt, nil
 }
 
-func (s *server) teardownBookLocked(id string) {
-	rt := s.books[id]
+func (s *server) teardownBookLocked(userID, id string) {
+	key := s.bookKey(userID, id)
+	rt := s.books[key]
 	if rt == nil {
 		return
 	}
@@ -320,34 +489,19 @@ func (s *server) teardownBookLocked(id string) {
 	if rt.engine != nil {
 		rt.engine.Close()
 	}
-	delete(s.books, id)
+	delete(s.books, key)
 }
 
-func (s *server) reloadAllBooks() error {
+func (s *server) withEngine(w http.ResponseWriter, r *http.Request, fn func(rt *bookRuntime, h *host.Host) (any, error)) {
+	u, err := userFrom(r)
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
 	s.bookMu.Lock()
 	defer s.bookMu.Unlock()
-	for id := range s.books {
-		s.teardownBookLocked(id)
-	}
-	ids := s.discoverBookIDsLocked()
-	var firstErr error
-	for _, id := range ids {
-		if _, err := s.ensureBookLocked(id); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if _, ok := s.books[s.active]; !ok {
-		if _, err := s.ensureBookLocked(s.active); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
-func (s *server) withEngine(w http.ResponseWriter, fn func(rt *bookRuntime, h *host.Host) (any, error)) {
-	s.bookMu.Lock()
-	defer s.bookMu.Unlock()
-	rt, err := s.ensureBookLocked(s.active)
+	active := s.loadActiveBookLocked(r.Context(), u.ID)
+	rt, err := s.ensureBookLocked(r.Context(), u.ID, active)
 	if err != nil {
 		http.Error(w, "engine unavailable: "+err.Error(), 400)
 		return
@@ -360,12 +514,13 @@ func (s *server) withEngine(w http.ResponseWriter, fn func(rt *bookRuntime, h *h
 	writeJSON(w, map[string]any{"ok": true, "data": result})
 }
 
-func (s *server) booksListLocked() []bookInfo {
-	ids := s.discoverBookIDsLocked()
+func (s *server) booksListLocked(userID string) []bookInfo {
+	ids := s.discoverBookIDsLocked(userID)
+	active := s.activeBook(userID)
 	books := make([]bookInfo, 0, len(ids))
 	for _, id := range ids {
-		info := bookInfo{ID: id, Title: id, Active: id == s.active}
-		if rt := s.books[id]; rt != nil && rt.engine != nil {
+		info := bookInfo{ID: id, Title: id, Active: id == active}
+		if rt := s.books[s.bookKey(userID, id)]; rt != nil && rt.engine != nil {
 			info.Dir = rt.engine.Dir()
 			info.Running = rt.engine.Snapshot().IsRunning
 		}
@@ -374,11 +529,11 @@ func (s *server) booksListLocked() []bookInfo {
 	return books
 }
 
-func (s *server) uniqueBookIDLocked(base string) string {
+func (s *server) uniqueBookIDLocked(userID, base string) string {
 	candidate := base
 	for i := 2; ; i++ {
 		exists := false
-		for _, id := range s.discoverBookIDsLocked() {
+		for _, id := range s.discoverBookIDsLocked(userID) {
 			if id == candidate {
 				exists = true
 				break
@@ -392,11 +547,16 @@ func (s *server) uniqueBookIDLocked(base string) string {
 }
 
 func (s *server) handleBooks(w http.ResponseWriter, r *http.Request) {
+	u, err := userFrom(r)
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.bookMu.Lock()
-		active := s.active
-		books := s.booksListLocked()
+		active := s.loadActiveBookLocked(r.Context(), u.ID)
+		books := s.booksListLocked(u.ID)
 		s.bookMu.Unlock()
 		writeJSON(w, map[string]any{"active": active, "books": books})
 	case http.MethodPost:
@@ -413,15 +573,16 @@ func (s *server) handleBooks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.bookMu.Lock()
-		id := s.uniqueBookIDLocked(base)
-		s.active = id
-		if _, err := s.ensureBookLocked(id); err != nil {
+		id := s.uniqueBookIDLocked(u.ID, base)
+		s.active[u.ID] = id
+		s.saveActiveBook(r.Context(), u.ID, id)
+		if _, err := s.ensureBookLocked(r.Context(), u.ID, id); err != nil {
 			s.bookMu.Unlock()
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		books := s.booksListLocked()
-		active := s.active
+		books := s.booksListLocked(u.ID)
+		active := s.loadActiveBookLocked(r.Context(), u.ID)
 		s.bookMu.Unlock()
 		writeJSON(w, map[string]any{"active": active, "books": books})
 	default:
@@ -430,6 +591,11 @@ func (s *server) handleBooks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) booksSwitch(w http.ResponseWriter, r *http.Request) {
+	u, err := userFrom(r)
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
 		return
@@ -446,23 +612,36 @@ func (s *server) booksSwitch(w http.ResponseWriter, r *http.Request) {
 		id = defaultBookID
 	}
 	s.bookMu.Lock()
-	if _, ok := s.books[id]; !ok {
+	found := false
+	for _, candidate := range s.discoverBookIDsLocked(u.ID) {
+		if candidate == id {
+			found = true
+			break
+		}
+	}
+	if !found {
 		s.bookMu.Unlock()
 		http.Error(w, "book not found", 404)
 		return
 	}
-	s.active = id
-	books := s.booksListLocked()
-	active := s.active
+	if _, err := s.ensureBookLocked(r.Context(), u.ID, id); err != nil {
+		s.bookMu.Unlock()
+		http.Error(w, "engine unavailable: "+err.Error(), 400)
+		return
+	}
+	s.active[u.ID] = id
+	s.saveActiveBook(r.Context(), u.ID, id)
+	books := s.booksListLocked(u.ID)
+	active := s.loadActiveBookLocked(r.Context(), u.ID)
 	s.bookMu.Unlock()
 	writeJSON(w, map[string]any{"active": active, "books": books})
 }
-func (s *server) snapshot(w http.ResponseWriter, _ *http.Request) {
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) { return h.Snapshot(), nil })
+func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) { return h.Snapshot(), nil })
 }
 
-func (s *server) engineModels(w http.ResponseWriter, _ *http.Request) {
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+func (s *server) engineModels(w http.ResponseWriter, r *http.Request) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		roles := []string{"default", "architect", "writer", "editor"}
 		providers := h.ConfiguredProviders()
 		providerModels := map[string][]string{}
@@ -505,7 +684,7 @@ func (s *server) engineStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prompt is required", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		prepared, err := startup.PrepareQuick(prompt)
 		if err != nil {
 			return nil, err
@@ -516,12 +695,12 @@ func (s *server) engineStart(w http.ResponseWriter, r *http.Request) {
 		if err := h.StartPrepared(prepared); err != nil {
 			return nil, err
 		}
-		return map[string]any{"dir": h.Dir()}, nil
+		return map[string]any{"started": true}, nil
 	})
 }
 
-func (s *server) engineResume(w http.ResponseWriter, _ *http.Request) {
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+func (s *server) engineResume(w http.ResponseWriter, r *http.Request) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		label, err := h.Resume()
 		if err != nil {
 			return nil, err
@@ -529,7 +708,7 @@ func (s *server) engineResume(w http.ResponseWriter, _ *http.Request) {
 		if label == "" {
 			return nil, fmt.Errorf("no resumable session")
 		}
-		return map[string]any{"label": label, "dir": h.Dir()}, nil
+		return map[string]any{"label": label}, nil
 	})
 }
 
@@ -546,7 +725,7 @@ func (s *server) engineSteer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "text is required", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.Steer(text) })
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.Steer(text) })
 }
 
 func (s *server) engineContinue(w http.ResponseWriter, r *http.Request) {
@@ -562,7 +741,7 @@ func (s *server) engineContinue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "text is required", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.Continue(text) })
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.Continue(text) })
 }
 
 func (s *server) engineReview(w http.ResponseWriter, r *http.Request) {
@@ -577,15 +756,15 @@ func (s *server) engineReview(w http.ResponseWriter, r *http.Request) {
 	if input.Mode == "off" {
 		mode = domain.ChapterAdvanceAuto
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.SetAdvanceMode(mode) })
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.SetAdvanceMode(mode) })
 }
 
-func (s *server) engineNext(w http.ResponseWriter, _ *http.Request) {
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.AdvanceOneChapter() })
+func (s *server) engineNext(w http.ResponseWriter, r *http.Request) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) { return nil, h.AdvanceOneChapter() })
 }
 
-func (s *server) engineStop(w http.ResponseWriter, _ *http.Request) {
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) { return map[string]any{"stopped": h.Abort()}, nil })
+func (s *server) engineStop(w http.ResponseWriter, r *http.Request) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) { return map[string]any{"stopped": h.Abort()}, nil })
 }
 
 func (s *server) engineReopen(w http.ResponseWriter, r *http.Request) {
@@ -596,7 +775,7 @@ func (s *server) engineReopen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		return nil, h.Reopen(strings.TrimSpace(input.Direction))
 	})
 }
@@ -613,11 +792,15 @@ func (s *server) engineExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
+	if strings.TrimSpace(input.Path) != "" {
+		http.Error(w, "server filesystem export paths are disabled", 400)
+		return
+	}
 	opts := exp.Options{OutPath: input.Path, From: input.From, To: input.To, Overwrite: input.Overwrite}
 	if input.Format != "" {
 		opts.Format = exp.Format(input.Format)
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) { return h.Export(context.Background(), opts) })
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) { return h.Export(context.Background(), opts) })
 }
 
 func (s *server) engineImport(w http.ResponseWriter, r *http.Request) {
@@ -632,6 +815,10 @@ func (s *server) engineImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
+	if strings.TrimSpace(input.Path) != "" {
+		http.Error(w, "server filesystem imports are disabled", 400)
+		return
+	}
 	opts := imp.Options{
 		SourcePath:      input.Path,
 		AutoConfirm:     input.AutoConfirm,
@@ -639,34 +826,34 @@ func (s *server) engineImport(w http.ResponseWriter, r *http.Request) {
 		ContinueAfter:   input.ContinueAfter,
 		Guidance:        input.Guidance,
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
-		bookID := rt.id
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
+		bookID, userID := rt.id, rt.userID
 		ch, err := h.ImportFrom(context.Background(), opts)
 		if err != nil {
 			return nil, err
 		}
 		go func() {
 			for ev := range ch {
-				s.broadcastTyped(bookID, "import", ev)
+				s.broadcastTyped(userID, bookID, "import", ev)
 			}
-			s.broadcastTyped(bookID, "import_done", nil)
+			s.broadcastTyped(userID, bookID, "import_done", nil)
 		}()
 		return map[string]any{"started": true}, nil
 	})
 }
 
-func (s *server) engineSimulate(w http.ResponseWriter, _ *http.Request) {
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
-		bookID := rt.id
+func (s *server) engineSimulate(w http.ResponseWriter, r *http.Request) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
+		bookID, userID := rt.id, rt.userID
 		ch, err := h.Simulate(context.Background())
 		if err != nil {
 			return nil, err
 		}
 		go func() {
 			for ev := range ch {
-				s.broadcastTyped(bookID, "sim", ev)
+				s.broadcastTyped(userID, bookID, "sim", ev)
 			}
-			s.broadcastTyped(bookID, "sim_done", nil)
+			s.broadcastTyped(userID, bookID, "sim_done", nil)
 		}()
 		return map[string]any{"started": true}, nil
 	})
@@ -680,17 +867,21 @@ func (s *server) engineImportSim(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
-		bookID := rt.id
+	if strings.TrimSpace(input.Path) != "" {
+		http.Error(w, "server filesystem imports are disabled", 400)
+		return
+	}
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
+		bookID, userID := rt.id, rt.userID
 		ch, err := h.ImportSimulationProfile(context.Background(), strings.TrimSpace(input.Path))
 		if err != nil {
 			return nil, err
 		}
 		go func() {
 			for ev := range ch {
-				s.broadcastTyped(bookID, "sim", ev)
+				s.broadcastTyped(userID, bookID, "sim", ev)
 			}
-			s.broadcastTyped(bookID, "sim_done", nil)
+			s.broadcastTyped(userID, bookID, "sim_done", nil)
 		}()
 		return map[string]any{"started": true}, nil
 	})
@@ -704,7 +895,7 @@ func (s *server) engineSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		if input.Check {
 			nums, err := h.CheckChapterRevisions()
 			if err != nil {
@@ -717,13 +908,13 @@ func (s *server) engineSync(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *server) engineDiag(w http.ResponseWriter, _ *http.Request) {
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+func (s *server) engineDiag(w http.ResponseWriter, r *http.Request) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		path, err := diag.Export(store.NewStore(h.Dir()))
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": path}, nil
+		return map[string]any{"generated": path != ""}, nil
 	})
 }
 
@@ -737,7 +928,7 @@ func (s *server) engineModel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		if err := h.SwitchModel(input.Role, input.Provider, input.Model); err != nil {
 			return nil, err
 		}
@@ -754,7 +945,7 @@ func (s *server) engineThinking(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		if err := h.SetRoleThinking(input.Role, input.Level); err != nil {
 			return nil, err
 		}
@@ -771,7 +962,7 @@ func (s *server) cocreateStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		rt.coMu.Lock()
 		defer rt.coMu.Unlock()
 		if input.Stage {
@@ -794,7 +985,7 @@ func (s *server) cocreateSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		rt.coMu.Lock()
 		state := rt.cocreate
 		if state == nil {
@@ -812,7 +1003,7 @@ func (s *server) cocreateSend(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		reply, err := stream(ctx, state.session.History(), func(kind, text string) {
-			s.broadcastTyped(rt.id, "cocreate_delta", map[string]any{"kind": kind, "text": text})
+			s.broadcastTyped(rt.userID, rt.id, "cocreate_delta", map[string]any{"kind": kind, "text": text})
 		})
 		if err != nil {
 			return nil, err
@@ -840,7 +1031,7 @@ func (s *server) cocreateApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		rt.coMu.Lock()
 		state := rt.cocreate
 		rt.coMu.Unlock()
@@ -871,8 +1062,8 @@ func (s *server) cocreateApply(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *server) cocreateCancel(w http.ResponseWriter, _ *http.Request) {
-	s.withEngine(w, func(rt *bookRuntime, h *host.Host) (any, error) {
+func (s *server) cocreateCancel(w http.ResponseWriter, r *http.Request) {
+	s.withEngine(w, r, func(rt *bookRuntime, h *host.Host) (any, error) {
 		rt.coMu.Lock()
 		rt.cocreate = nil
 		rt.coMu.Unlock()
@@ -881,10 +1072,16 @@ func (s *server) cocreateCancel(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *server) chapters(w http.ResponseWriter, _ *http.Request) {
+func (s *server) chapters(w http.ResponseWriter, r *http.Request) {
+	u, err := s.auth.currentUser(r)
+	if err != nil {
+		writeJSON(w, []chapter{})
+		return
+	}
 	s.bookMu.Lock()
-	root := filepath.Join("output", "novel", "chapters")
-	if rt := s.books[s.active]; rt != nil && rt.engine != nil {
+	active := s.loadActiveBookLocked(r.Context(), u.ID)
+	root := filepath.Join(s.bookDirForID(u.ID, active), "chapters")
+	if rt := s.books[s.bookKey(u.ID, active)]; rt != nil && rt.engine != nil {
 		root = filepath.Join(rt.engine.Dir(), "chapters")
 	}
 	s.bookMu.Unlock()
@@ -917,172 +1114,6 @@ func (s *server) chapters(w http.ResponseWriter, _ *http.Request) {
 	})
 	writeJSON(w, result)
 }
-func (s *server) config(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.configGet(w, r)
-	case http.MethodPost, http.MethodPut:
-		s.configSave(w, r)
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
-func (s *server) configGet(w http.ResponseWriter, _ *http.Request) {
-	cfg, err := bootstrap.LoadConfig()
-	if err != nil {
-		cfg = bootstrap.Config{}
-	}
-	cfg.FillDefaults()
-	provider := strings.TrimSpace(cfg.Provider)
-	if provider == "" {
-		provider = "openrouter"
-	}
-	pc := bootstrap.ProviderConfig{}
-	if v, ok := cfg.Providers[provider]; ok {
-		pc = v
-	}
-	providerConfigs := make(map[string]any, len(cfg.Providers))
-	for name, configured := range cfg.Providers {
-		providerConfigs[name] = map[string]any{
-			"type":           configured.Type,
-			"base_url":       configured.BaseURL,
-			"models":         modelNames(configured.Models),
-			"api_key_set":    configured.APIKey != "",
-			"api_key_masked": maskAPIKey(configured.APIKey),
-		}
-	}
-	writeJSON(w, map[string]any{
-		"provider":         provider,
-		"model":            cfg.ModelName,
-		"models":           modelNames(pc.Models),
-		"provider_configs": providerConfigs,
-		"base_url":         pc.BaseURL,
-		"api_key_set":      pc.APIKey != "",
-		"api_key_masked":   maskAPIKey(pc.APIKey),
-		"style":            cfg.Style,
-		"path":             bootstrap.EffectiveConfigPath(),
-	})
-}
-
-func (s *server) configSave(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Provider string   `json:"provider"`
-		APIKey   string   `json:"api_key"`
-		BaseURL  string   `json:"base_url"`
-		Model    string   `json:"model"`
-		Models   []string `json:"models"`
-		Type     string   `json:"type"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), 400)
-		return
-	}
-
-	cfg, err := bootstrap.LoadConfig()
-	if err != nil {
-		cfg = bootstrap.Config{}
-	}
-
-	provider := strings.TrimSpace(input.Provider)
-	if provider == "" {
-		provider = strings.TrimSpace(cfg.Provider)
-	}
-	if provider == "" {
-		http.Error(w, "provider is required", 400)
-		return
-	}
-	model := strings.TrimSpace(input.Model)
-	if model == "" {
-		model = strings.TrimSpace(cfg.ModelName)
-	}
-
-	cfg.Provider = provider
-	if model != "" {
-		cfg.ModelName = model
-	}
-
-	if cfg.Providers == nil {
-		cfg.Providers = make(map[string]bootstrap.ProviderConfig)
-	}
-	pc := cfg.Providers[provider]
-	if key := strings.TrimSpace(input.APIKey); key != "" {
-		pc.APIKey = key
-	}
-	if base := strings.TrimSpace(input.BaseURL); base != "" {
-		pc.BaseURL = base
-	}
-	if typ := strings.TrimSpace(input.Type); typ != "" {
-		pc.Type = typ
-	}
-	if len(pc.Models) == 0 && cfg.ModelName != "" {
-		pc.Models = []bootstrap.ModelConfig{{Name: cfg.ModelName}}
-	}
-	if input.Models != nil {
-		pc.Models = make([]bootstrap.ModelConfig, 0, len(input.Models))
-		seen := map[string]bool{}
-		for _, name := range input.Models {
-			name = strings.TrimSpace(name)
-			if name != "" && !seen[name] {
-				pc.Models = append(pc.Models, bootstrap.ModelConfig{Name: name})
-				seen[name] = true
-			}
-		}
-		if len(pc.Models) == 0 && model != "" {
-			pc.Models = []bootstrap.ModelConfig{{Name: model}}
-		}
-	}
-	cfg.Providers[provider] = pc
-	if cfg.Style == "" {
-		cfg.Style = "default"
-	}
-	if cfg.Roles == nil {
-		cfg.Roles = make(map[string]bootstrap.RoleConfig)
-	}
-
-	path := bootstrap.EffectiveConfigPath()
-	if path == "" {
-		http.Error(w, "cannot resolve config path", 500)
-		return
-	}
-	if err := bootstrap.SaveConfig(path, cfg); err != nil {
-		http.Error(w, "save config: "+err.Error(), 500)
-		return
-	}
-
-	engineError := ""
-	engineReady := false
-	if err := s.reloadAllBooks(); err != nil {
-		engineError = err.Error()
-	} else {
-		engineReady = true
-	}
-	writeJSON(w, map[string]any{
-		"ok": true, "path": path, "provider": provider, "model": cfg.ModelName,
-		"engine_ready": engineReady, "engine_error": engineError,
-	})
-}
-
-func maskAPIKey(key string) string {
-	if key == "" {
-		return ""
-	}
-	if len(key) <= 10 {
-		return "****"
-	}
-	return key[:4] + "..." + key[len(key)-4:]
-}
-
-func modelNames(models []bootstrap.ModelConfig) []string {
-	result := make([]string, 0, len(models))
-	for _, model := range models {
-		if name := strings.TrimSpace(model.Name); name != "" {
-			result = append(result, name)
-		}
-	}
-	return result
-}
-
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(value)
