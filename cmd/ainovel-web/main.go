@@ -146,7 +146,7 @@ func main() {
 	handle("/api/engine/cocreate/send", s.cocreateSend)
 	handle("/api/engine/cocreate/apply", s.cocreateApply)
 	handle("/api/engine/cocreate/cancel", s.cocreateCancel)
-	handle("/api/books", s.handleBooks)
+	mux.HandleFunc("/api/books", s.handleBooks)
 	handle("/api/books/switch", s.booksSwitch)
 	handle("/api/books/queue/cancel", s.cancelQueuedWrite)
 
@@ -714,6 +714,17 @@ func (s *server) booksListLocked(userID string) []bookInfo {
 	return books
 }
 
+// publicBooksListLocked exposes the shared bookshelf without exposing a
+// workspace's local runtime details to visitors.
+func (s *server) publicBooksListLocked() []bookInfo {
+	ids := s.discoverBookIDsLocked("")
+	books := make([]bookInfo, 0, len(ids))
+	for _, id := range ids {
+		books = append(books, bookInfo{ID: id, Title: id, Active: id == defaultBookID})
+	}
+	return books
+}
+
 func (s *server) uniqueBookIDLocked(userID, base string) string {
 	candidate := base
 	for i := 2; ; i++ {
@@ -732,20 +743,27 @@ func (s *server) uniqueBookIDLocked(userID, base string) string {
 }
 
 func (s *server) handleBooks(w http.ResponseWriter, r *http.Request) {
-	u, err := userFrom(r)
-	if err != nil {
-		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
+		u, err := s.auth.currentUser(r)
 		s.bookMu.Lock()
+		if err != nil {
+			books := s.publicBooksListLocked()
+			s.bookMu.Unlock()
+			writeJSON(w, map[string]any{"active": defaultBookID, "books": books})
+			return
+		}
 		active := s.loadActiveBookLocked(r.Context(), u.ID)
 		books := s.booksListLocked(u.ID)
 		collaboration := s.collaborationLocked(u.ID, active)
 		s.bookMu.Unlock()
 		writeJSON(w, map[string]any{"active": active, "books": books, "collaboration": collaboration})
 	case http.MethodPost:
+		u, err := s.auth.currentUser(r)
+		if err != nil {
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+			return
+		}
 		var input struct {
 			Name string `json:"name"`
 		}
@@ -1305,15 +1323,32 @@ func (s *server) cocreateCancel(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) chapters(w http.ResponseWriter, r *http.Request) {
 	u, err := s.auth.currentUser(r)
-	if err != nil {
-		writeJSON(w, []chapter{})
-		return
-	}
 	s.bookMu.Lock()
-	active := s.loadActiveBookLocked(r.Context(), u.ID)
-	root := filepath.Join(s.bookDirForID(u.ID, active), "chapters")
-	if rt := s.books[s.bookKey(u.ID, active)]; rt != nil && rt.engine != nil {
-		root = filepath.Join(rt.engine.Dir(), "chapters")
+	var root string
+	if err != nil {
+		id := strings.TrimSpace(r.URL.Query().Get("book"))
+		if id == "" {
+			id = defaultBookID
+		}
+		found := false
+		for _, candidate := range s.discoverBookIDsLocked("") {
+			if candidate == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.bookMu.Unlock()
+			writeJSON(w, []chapter{})
+			return
+		}
+		root = filepath.Join(s.bookDirForID("", id), "chapters")
+	} else {
+		active := s.loadActiveBookLocked(r.Context(), u.ID)
+		root = filepath.Join(s.bookDirForID(u.ID, active), "chapters")
+		if rt := s.books[s.bookKey(u.ID, active)]; rt != nil && rt.engine != nil {
+			root = filepath.Join(rt.engine.Dir(), "chapters")
+		}
 	}
 	s.bookMu.Unlock()
 

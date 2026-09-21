@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -85,6 +86,56 @@ func TestBooksAreSharedByCollaborators(t *testing.T) {
 	s.bookMu.Unlock()
 	if !reflect.DeepEqual(gotOne, []string{defaultBookID, "draft"}) || !reflect.DeepEqual(gotTwo, gotOne) {
 		t.Fatalf("book discovery is not shared: u1=%v u2=%v", gotOne, gotTwo)
+	}
+}
+
+func TestGuestCanListSharedBooks(t *testing.T) {
+	a := testAuth(t)
+	s := &server{auth: a, books: make(map[string]*bookRuntime), active: make(map[string]string)}
+	bookDir := filepath.Join(a.cfg.dataDir, "shared", "books", "draft", "output", "novel")
+	if err := os.MkdirAll(bookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	s.handleBooks(w, httptest.NewRequest(http.MethodGet, "/api/books", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Active string     `json:"active"`
+		Books  []bookInfo `json:"books"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Active != defaultBookID || !reflect.DeepEqual(result.Books, []bookInfo{{ID: defaultBookID, Title: defaultBookID, Active: true}, {ID: "draft", Title: "draft"}}) {
+		t.Fatalf("guest bookshelf = %#v", result)
+	}
+}
+
+func TestGuestCanReadSelectedSharedBook(t *testing.T) {
+	a := testAuth(t)
+	s := &server{auth: a, books: make(map[string]*bookRuntime), active: make(map[string]string)}
+	chaptersDir := filepath.Join(a.cfg.dataDir, "shared", "books", "draft", "output", "novel", "chapters")
+	if err := os.MkdirAll(chaptersDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chaptersDir, "第一章.md"), []byte("访客可读"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	s.chapters(w, httptest.NewRequest(http.MethodGet, "/api/chapters?book=draft", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var chapters []chapter
+	if err := json.NewDecoder(w.Body).Decode(&chapters); err != nil {
+		t.Fatal(err)
+	}
+	if len(chapters) != 1 || chapters[0].Name != "第一章" || chapters[0].Content != "访客可读" {
+		t.Fatalf("guest chapters = %#v", chapters)
 	}
 }
 

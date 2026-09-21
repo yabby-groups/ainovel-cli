@@ -158,7 +158,7 @@ async function resetBookViews() {
 }
 
 async function refreshChapters() {
-  const res = await api('/api/chapters');
+  const res = await api('/api/chapters?book=' + encodeURIComponent(currentBookId));
   const chapters = Array.isArray(res.data) ? res.data : [];
   $('#chapters').innerHTML = chapters.length
     ? chapters.map((c, i) => `<button class="chapter" data-i="${i}"><strong>${escapeHtml(c.name)}</strong><small>${c.content.length} 字 · ${new Date(c.modified).toLocaleString()}</small></button>`).join('')
@@ -347,7 +347,12 @@ async function startWorkspace(user) {
   $('#logout').onclick = logout;
   if (guest) {
     setStatus('访客模式');
-    renderBooks({ active: currentBookId, books: [{ id: currentBookId, title: currentBookId, active: true }] });
+    const books = await loadBooks();
+    const list = books.ok ? (books.data.books || []) : [];
+    if (list.length) {
+      currentBookId = list[Math.floor(Math.random() * list.length)].id;
+      renderBooks({ ...books.data, active: currentBookId });
+    }
     await refreshChapters();
     connectSSE();
     wireGuestActions();
@@ -538,12 +543,20 @@ function resumeLogin() {
 
 function wireGuestActions() {
   const selectors = [
-    '#createBook', '#switchBook', '#applyModel', '#start', '#resume', '#cocreateOpen',
+    '#createBook', '#applyModel', '#start', '#resume', '#cocreateOpen',
     '#stageCocreate', '#steerBtn', '#continueBtn', '#reviewBtn', '#nextBtn', '#stopBtn',
     '#reopenBtn', '#importBtn', '#exportBtn', '#syncBtn', '#syncCheckBtn', '#diagBtn',
     '#simulateBtn', '#importsimBtn', '#cocreateSend', '#cocreateApply', '#cocreateCancel'
   ];
   for (const selector of selectors) $(selector).onclick = beginLogin;
+  const switchBook = async () => {
+    currentBookId = $('#bookSelect').value || 'default';
+    $('#bookMsg').textContent = '正在阅读';
+    await refreshChapters();
+    $('#bookMsg').textContent = '';
+  };
+  $('#bookSelect').onchange = switchBook;
+  $('#switchBook').onclick = switchBook;
 }
 
 async function logout() {
