@@ -185,7 +185,7 @@ function renderSnapshot(snap) {
       <div><span>书名</span><b>${escapeHtml(snap.BookTitle || '—')}</b></div>
       <div><span>模型</span><b>${escapeHtml(snap.ModelName)}</b></div>
       <div><span>进度</span><b>${snap.CompletedCount}/${snap.TotalChapters} 章 · ${snap.TotalWordCount} 字</b></div>
-      <div><span>停止条件</span><b>${snap.StopTargetWordCount ? `${snap.TotalWordCount}/${snap.StopTargetWordCount} 字` : '字数不限'} · ${snap.StopTargetChapterCount ? `${snap.CompletedCount}/${snap.StopTargetChapterCount} 章` : '章节不限'}</b></div>
+      <div><span>本次续写</span><b>${snap.StopTargetWordCount ? `${snap.StopTargetWordsWritten || 0}/${snap.StopTargetWordCount} 字` : '字数不限'} · ${snap.StopTargetChapterCount ? `${snap.StopTargetChaptersWritten || 0}/${snap.StopTargetChapterCount} 章` : '章节不限'}</b></div>
       <div><span>当前</span><b>第${snap.CurrentChapter}章 · ${escapeHtml(snap.Phase)}</b></div>
       <div><span>验收</span><b>${escapeHtml(snap.AdvanceMode)}${snap.PendingRewrites && snap.PendingRewrites.length ? ' · 待重写 ' + snap.PendingRewrites.join(',') : ''}</b></div>
       <div><span>用量</span><b>${snap.TotalInputTokens} in / ${snap.TotalOutputTokens} out · $${Number(snap.TotalCostUSD || 0).toFixed(4)}</b></div>
@@ -401,7 +401,7 @@ async function startWorkspace(user) {
       $('#stopTargetsMsg').textContent = '保存失败：' + res.error;
       return;
     }
-    $('#stopTargetsMsg').textContent = wordCount || chapterCount ? '已保存；任一条件达到后将在本章完成时暂停' : '已清除我的停止条件';
+    $('#stopTargetsMsg').textContent = wordCount || chapterCount ? '已保存；本次续写达到任一条件后将在本章完成时暂停' : '已清除我的停止条件';
     await refreshSnapshot();
   };
 

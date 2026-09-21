@@ -916,6 +916,10 @@ func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
 		snap := h.Snapshot()
 		snap.StopTargetWordCount = targets.WordCount
 		snap.StopTargetChapterCount = targets.ChapterCount
+		if rt.userID != u.ID {
+			snap.StopTargetWordsWritten = 0
+			snap.StopTargetChaptersWritten = 0
+		}
 		return snap, nil
 	})
 }

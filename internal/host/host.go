@@ -798,9 +798,18 @@ func (h *Host) SetAdvanceMode(mode domain.ChapterAdvanceMode) error {
 	return nil
 }
 
-// SetStopTargets 保存用户设定的总字数/章节安全暂停目标，不会中断正在生成的章节。
+// SetStopTargets 保存用户设定的本次续写字数/章节安全暂停目标，不会中断正在生成的章节。
 func (h *Host) SetStopTargets(targets domain.StopTargets) error {
-	return h.gate.SetStopTargets(targets)
+	progress, err := h.store.Progress.Load()
+	if err != nil {
+		return err
+	}
+	baseWords, baseChapters := 0, 0
+	if progress != nil {
+		baseWords = progress.TotalWordCount
+		baseChapters = len(progress.CompletedChapters)
+	}
+	return h.gate.SetStopTargetsAt(targets, baseWords, baseChapters)
 }
 
 // AdvanceOneChapter 在逐章验收模式下授权一个精确章节并启动 Engine。
@@ -1230,9 +1239,10 @@ func (h *Host) Snapshot() UISnapshot {
 			snap.AdvanceHoldReason = meta.AdvanceHold.Reason
 		}
 	}
-	targets := h.gate.StopTargets()
+	targets, words, chapters := h.gate.StopTargetStatus(progress)
 	snap.StopTargetWordCount = targets.WordCount
 	snap.StopTargetChapterCount = targets.ChapterCount
+	snap.StopTargetWordsWritten, snap.StopTargetChaptersWritten = words, chapters
 
 	snap.Agents = h.observer.agentSnapshots()
 	snap.StatusLabel = deriveStatusLabel(snap)

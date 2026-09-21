@@ -290,6 +290,37 @@ func TestChapterAdvanceGateWaitsForConfiguredTargetCommitRecovery(t *testing.T) 
 	}
 }
 
+func TestChapterAdvanceGateConfiguredTargetCountsOnlyContinuation(t *testing.T) {
+	st, gate, recorder := newAdvanceGateTest(t, domain.ChapterAdvanceAuto)
+	if err := st.Progress.MarkChapterComplete(1, 90000, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(1), "commit", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.SetStopTargetsAt(domain.StopTargets{WordCount: 1500, ChapterCount: 2}, 90000, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(2, 1000, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(2), "commit", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if gate.HandleBoundary() {
+		t.Fatal("existing book content must not count toward a continuation target")
+	}
+	if err := st.Progress.MarkChapterComplete(3, 1000, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Checkpoints.Append(domain.ChapterScope(3), "commit", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !gate.HandleBoundary() || recorder.paused != 1 {
+		t.Fatal("new continuation output should trigger the configured target")
+	}
+}
+
 func TestChapterAdvanceGateTargetHoldWaitsForCommitRecovery(t *testing.T) {
 	st, gate, recorder := newAdvanceGateTest(t, domain.ChapterAdvanceAuto)
 	hold := domain.AdvanceHold{After: domain.AdvanceHoldAtChapter, TargetChapter: 1, Reason: "写到第1章"}

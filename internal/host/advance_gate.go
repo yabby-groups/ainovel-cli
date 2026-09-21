@@ -17,21 +17,31 @@ import (
 //
 // 它不参与 Route，不解释 Task/Reason，也不做文学判断。
 type ChapterAdvanceGate struct {
-	store    *store.Store
-	pause    func(reason string)
-	report   func(level, summary string)
-	targetMu sync.RWMutex
-	targets  domain.StopTargets
+	store            *store.Store
+	pause            func(reason string)
+	report           func(level, summary string)
+	targetMu         sync.RWMutex
+	targets          domain.StopTargets
+	baseWordCount    int
+	baseChapterCount int
 }
 
 // SetStopTargets updates the current writer's user-scoped limits. Persistence
 // belongs to the caller because a shared novel may have multiple writers.
 func (g *ChapterAdvanceGate) SetStopTargets(targets domain.StopTargets) error {
+	return g.SetStopTargetsAt(targets, 0, 0)
+}
+
+// SetStopTargetsAt makes targets relative to the writing progress at the start
+// of this user's turn. It therefore limits continuation volume, not book size.
+func (g *ChapterAdvanceGate) SetStopTargetsAt(targets domain.StopTargets, baseWordCount, baseChapterCount int) error {
 	if err := targets.Validate(); err != nil {
 		return err
 	}
 	g.targetMu.Lock()
 	g.targets = targets
+	g.baseWordCount = max(0, baseWordCount)
+	g.baseChapterCount = max(0, baseChapterCount)
 	g.targetMu.Unlock()
 	return nil
 }
@@ -40,6 +50,20 @@ func (g *ChapterAdvanceGate) StopTargets() domain.StopTargets {
 	g.targetMu.RLock()
 	defer g.targetMu.RUnlock()
 	return g.targets
+}
+
+func (g *ChapterAdvanceGate) StopTargetProgress(progress *domain.Progress) (words, chapters int) {
+	_, words, chapters = g.StopTargetStatus(progress)
+	return words, chapters
+}
+
+func (g *ChapterAdvanceGate) StopTargetStatus(progress *domain.Progress) (targets domain.StopTargets, words, chapters int) {
+	g.targetMu.RLock()
+	defer g.targetMu.RUnlock()
+	if progress == nil {
+		return g.targets, 0, 0
+	}
+	return g.targets, max(0, progress.TotalWordCount-g.baseWordCount), max(0, len(progress.CompletedChapters)-g.baseChapterCount)
 }
 
 func NewChapterAdvanceGate(s *store.Store, pause func(reason string), report func(level, summary string)) *ChapterAdvanceGate {
@@ -65,7 +89,7 @@ func (g *ChapterAdvanceGate) HandleBoundary() bool {
 	if meta.AdvanceMode == domain.ChapterAdvanceAuto && meta.AdvancePermitChapter != 0 {
 		return g.fail(fmt.Errorf("auto 模式残留第 %d 章许可", meta.AdvancePermitChapter))
 	}
-	if g.handleStopTargets(g.StopTargets()) {
+	if g.handleStopTargets() {
 		return true
 	}
 
@@ -83,7 +107,8 @@ func (g *ChapterAdvanceGate) HandleBoundary() bool {
 
 // handleStopTargets 在章节提交与 checkpoint 均稳定后暂停。目标是持久配置而非
 // 一次性 hold，故不消费；用户必须调高或清空目标后再继续。
-func (g *ChapterAdvanceGate) handleStopTargets(targets domain.StopTargets) bool {
+func (g *ChapterAdvanceGate) handleStopTargets() bool {
+	targets := g.StopTargets()
 	if targets.WordCount == 0 && targets.ChapterCount == 0 {
 		return false
 	}
@@ -91,7 +116,8 @@ func (g *ChapterAdvanceGate) handleStopTargets(targets domain.StopTargets) bool 
 	if err != nil {
 		return g.fail(fmt.Errorf("读取 Progress 解析停止目标: %w", err))
 	}
-	if !targets.Reached(progress) {
+	targets, words, chapters := g.StopTargetStatus(progress)
+	if !targets.Reached(progress, progress.TotalWordCount-words, len(progress.CompletedChapters)-chapters) {
 		return false
 	}
 	pending, err := g.store.Signals.LoadPendingCommit()
@@ -106,11 +132,11 @@ func (g *ChapterAdvanceGate) handleStopTargets(targets domain.StopTargets) bool 
 		return g.fail(fmt.Errorf("停止目标已达到，但第 %d 章缺少稳定提交 checkpoint", latest))
 	}
 	parts := make([]string, 0, 2)
-	if targets.WordCount > 0 && progress.TotalWordCount >= targets.WordCount {
-		parts = append(parts, fmt.Sprintf("累计 %d/%d 字", progress.TotalWordCount, targets.WordCount))
+	if targets.WordCount > 0 && words >= targets.WordCount {
+		parts = append(parts, fmt.Sprintf("本次续写 %d/%d 字", words, targets.WordCount))
 	}
-	if targets.ChapterCount > 0 && len(progress.CompletedChapters) >= targets.ChapterCount {
-		parts = append(parts, fmt.Sprintf("已完成 %d/%d 章", len(progress.CompletedChapters), targets.ChapterCount))
+	if targets.ChapterCount > 0 && chapters >= targets.ChapterCount {
+		parts = append(parts, fmt.Sprintf("本次续写 %d/%d 章", chapters, targets.ChapterCount))
 	}
 	g.pauseNow("已达到用户设定的停止目标（" + strings.Join(parts, "；") + "），已暂停；调整目标后可继续创作")
 	return true
