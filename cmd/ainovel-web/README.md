@@ -19,6 +19,9 @@ SQLite defaults to `AINOVEL_WEB_DATA_DIR/ainovel-web.sqlite`. Store the data
 directory on a persistent volume. Terminate HTTPS at the reverse proxy. For a
 local HTTP-only development server, set `AINOVEL_WEB_INSECURE_COOKIE=1`.
 
-The server encrypts OAuth and Token Base credentials at rest. Books live below
-`users/<myna-user-id>/books/`; do not manually merge legacy shared books into
-that tree because they have no trustworthy owner mapping.
+The server encrypts OAuth and Token Base credentials at rest. Collaborative
+books live below `shared/books/`. Only one logged-in user can write a book at a
+time; other write requests wait in FIFO order and may be cancelled by their
+requester. When a queued request starts, it uses that user's own Myna Token
+Base credential. Existing `users/<myna-user-id>/books/` directories are left
+untouched and are not merged automatically.

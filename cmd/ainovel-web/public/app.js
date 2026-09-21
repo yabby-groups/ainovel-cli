@@ -4,6 +4,7 @@ let streamBuffer = '';
 let modelData = null;
 let currentBookId = 'default';
 let bookSwitchPromise = Promise.resolve();
+let collaboration = null;
 
 function escapeHtml(v) {
   return String(v ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -84,7 +85,29 @@ async function loadBooks() {
 
 function applyBooks(data) {
   currentBookId = data.active || currentBookId;
+  collaboration = data.collaboration || null;
   renderBooks(data);
+  renderCollaboration();
+}
+
+function renderCollaboration() {
+  const label = $('#collaboration');
+  const cancel = $('#cancelQueue');
+  if (!label || !cancel) return;
+  const state = collaboration || {};
+  if (state.position) {
+    label.textContent = `等待中，前方 ${state.position - 1} 人`;
+    label.hidden = false;
+    cancel.hidden = false;
+    return;
+  }
+  if (state.holder) {
+    label.textContent = state.running ? `${state.holder} 正在写作` : `${state.holder} 正在处理`;
+    label.hidden = false;
+  } else {
+    label.hidden = true;
+  }
+  cancel.hidden = true;
 }
 
 function renderBooks(data) {
@@ -220,6 +243,26 @@ function connectSSE() {
     try { msg = JSON.parse(e.data); } catch (err) { return; }
     if (msg.book && currentBookId && msg.book !== currentBookId) return;
     switch (msg.type) {
+      case 'queued':
+        addEventLine(`[协作] 已进入等待队列，第 ${(msg.data && msg.data.position) || '?'} 位`);
+        break;
+      case 'queue_updated':
+        loadBooks();
+        break;
+      case 'lock_acquired':
+        addEventLine(`[协作] ${(msg.data && msg.data.user) || '协作者'} 获得写作权`);
+        loadBooks();
+        break;
+      case 'released':
+        addEventLine(`[协作] 写作权已释放：${(msg.data && msg.data.reason) || ''}`);
+        loadBooks();
+        break;
+      case 'queue_cancelled':
+        addEventLine('[协作] 已取消等待');
+        break;
+      case 'queue_skipped':
+        addEventLine(`[协作] 排队请求未执行：${(msg.data && msg.data.error) || ''}`, 'warn');
+        break;
       case 'event': {
         const ev = msg.data || {};
         const time = ev.Time ? new Date(ev.Time).toLocaleTimeString() : '';
@@ -318,6 +361,10 @@ async function startWorkspace(user) {
   connectSSE();
 
   $('#refresh').onclick = refreshChapters;
+  $('#cancelQueue').onclick = async () => {
+    const res = await api('/api/books/queue/cancel', 'POST');
+    if (res.ok) await loadBooks();
+  };
   $('#close').onclick = () => $('#chapterDialog').close();
   $('#bookSelect').onchange = switchBook;
   $('#switchBook').onclick = switchBook;

@@ -65,16 +65,16 @@ func TestLoadAuthConfigRejectsInvalidSecrets(t *testing.T) {
 	}
 }
 
-func TestBooksAreScopedToTheirUser(t *testing.T) {
+func TestBooksAreSharedByCollaborators(t *testing.T) {
 	a := testAuth(t)
 	s := &server{auth: a, books: make(map[string]*bookRuntime), active: make(map[string]string)}
-	if s.bookKey("u1", "draft") == s.bookKey("u2", "draft") {
-		t.Fatal("book runtime keys must include the user")
+	if s.bookKey("u1", "draft") != s.bookKey("u2", "draft") {
+		t.Fatal("book runtime keys must be shared")
 	}
 	userOneBook := s.bookDirForID("u1", "draft")
 	userTwoBook := s.bookDirForID("u2", "draft")
-	if userOneBook == userTwoBook {
-		t.Fatal("book directories must include the user")
+	if userOneBook != userTwoBook {
+		t.Fatal("book directories must be shared")
 	}
 	if err := os.MkdirAll(filepath.Dir(userOneBook), 0o700); err != nil {
 		t.Fatal(err)
@@ -83,7 +83,37 @@ func TestBooksAreScopedToTheirUser(t *testing.T) {
 	gotOne := s.discoverBookIDsLocked("u1")
 	gotTwo := s.discoverBookIDsLocked("u2")
 	s.bookMu.Unlock()
-	if !reflect.DeepEqual(gotOne, []string{defaultBookID, "draft"}) || !reflect.DeepEqual(gotTwo, []string{defaultBookID}) {
-		t.Fatalf("book discovery is not user-scoped: u1=%v u2=%v", gotOne, gotTwo)
+	if !reflect.DeepEqual(gotOne, []string{defaultBookID, "draft"}) || !reflect.DeepEqual(gotTwo, gotOne) {
+		t.Fatalf("book discovery is not shared: u1=%v u2=%v", gotOne, gotTwo)
+	}
+}
+
+func TestCollaborationStateReportsQueuePosition(t *testing.T) {
+	s := &server{books: map[string]*bookRuntime{
+		"draft": {id: "draft", userID: "u1", userName: "One", locked: true, queue: []queuedWrite{{userID: "u2"}, {userID: "u3"}}},
+	}}
+	state := s.collaborationLocked("u3", "draft")
+	if state.Holder != "One" || state.Queued != 2 || state.Position != 2 {
+		t.Fatalf("collaboration state = %#v", state)
+	}
+}
+
+func TestCancelQueuedWriteOnlyRemovesCurrentUser(t *testing.T) {
+	a := testAuth(t)
+	s := &server{
+		auth:   a,
+		books:  map[string]*bookRuntime{"default": {id: "default", userID: "u1", locked: true, queue: []queuedWrite{{userID: "u2"}, {userID: "u3"}}}},
+		active: map[string]string{"u2": defaultBookID},
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/books/queue/cancel", nil)
+	r = r.WithContext(context.WithValue(r.Context(), contextUserKey{}, &webUser{ID: "u2", Name: "Two"}))
+	w := httptest.NewRecorder()
+	s.cancelQueuedWrite(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	queue := s.books[defaultBookID].queue
+	if len(queue) != 1 || queue[0].userID != "u3" {
+		t.Fatalf("queue = %#v", queue)
 	}
 }
