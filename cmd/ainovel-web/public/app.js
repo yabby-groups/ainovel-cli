@@ -5,6 +5,10 @@ let modelData = null;
 let currentBookId = 'default';
 let bookSwitchPromise = Promise.resolve();
 let collaboration = null;
+const deviceLoginStorageKey = 'ainovel-device-login';
+let loginStartPromise = null;
+let loginPollTimer = null;
+let loginPollInFlight = false;
 
 function escapeHtml(v) {
   return String(v ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -533,6 +537,22 @@ async function startWorkspace(user) {
 }
 
 async function beginLogin() {
+  if (readDeviceLogin()) {
+    resumeLogin();
+    return;
+  }
+  if (loginStartPromise) return loginStartPromise;
+
+  setLoginPending(true);
+  loginStartPromise = startLogin();
+  try {
+    await loginStartPromise;
+  } finally {
+    loginStartPromise = null;
+  }
+}
+
+async function startLogin() {
   // Embedded browsers and popup-blocked browsers use this tab, then resume after Myna returns.
   const inWeChat = /MicroMessenger/i.test(navigator.userAgent);
   let loginWindow = null;
@@ -544,10 +564,13 @@ async function beginLogin() {
   const res = await api('/api/auth/device', 'POST', useSameTab ? { return_after_authorization: true } : undefined);
   if (!res.ok) {
     if (loginWindow) loginWindow.close();
+    setLoginPending(false);
     return;
   }
   const d = res.data;
-  sessionStorage.setItem('ainovel-device-login', JSON.stringify({ id: d.id, interval: d.interval }));
+  const delay = Math.max(3000, Number(d.interval || 3) * 1000);
+  const now = Date.now();
+  saveDeviceLogin({ id: d.id, interval: d.interval, issued_at: now, next_poll_at: now + delay });
   const authorizationURL = d.verification_uri_complete || d.verification_uri;
   if (useSameTab) {
     showApiToast(inWeChat ? '正在打开微信授权，完成后请返回本页。' : '正在打开登录页，完成后将自动返回。');
@@ -558,21 +581,69 @@ async function beginLogin() {
   resumeLogin();
 }
 
+function readDeviceLogin() {
+  try {
+    const attempt = JSON.parse(sessionStorage.getItem(deviceLoginStorageKey));
+    return attempt && attempt.id ? attempt : null;
+  } catch (_) {
+    sessionStorage.removeItem(deviceLoginStorageKey);
+    return null;
+  }
+}
+
+function saveDeviceLogin(attempt) {
+  sessionStorage.setItem(deviceLoginStorageKey, JSON.stringify(attempt));
+}
+
+function clearDeviceLogin() {
+  sessionStorage.removeItem(deviceLoginStorageKey);
+}
+
+function setLoginPending(pending) {
+  const login = $('#loginTop');
+  if (!login || login.hidden) return;
+  login.disabled = pending;
+  login.textContent = pending ? '正在确认授权...' : '登录后共写';
+  if ($('#accountName').textContent === '访客') setStatus(pending ? '正在确认授权' : '访客模式');
+}
+
 function resumeLogin() {
-  let attempt;
-  try { attempt = JSON.parse(sessionStorage.getItem('ainovel-device-login')); } catch (_) {}
-  if (!attempt || !attempt.id) return;
+  const attempt = readDeviceLogin();
+  if (!attempt) {
+    setLoginPending(false);
+    return;
+  }
+  setLoginPending(true);
+  if (loginPollTimer || loginPollInFlight) return;
   const delay = Math.max(3000, Number(attempt.interval || 3) * 1000);
-  const poll = async () => {
+  const nextPollAt = Number(attempt.next_poll_at) || (Number(attempt.issued_at) || Date.now()) + delay;
+  loginPollTimer = setTimeout(async () => {
+    loginPollTimer = null;
+    if (loginPollInFlight) return;
+    loginPollInFlight = true;
     const status = await api('/api/auth/device/' + encodeURIComponent(attempt.id), 'POST');
-    if (!status.ok) { sessionStorage.removeItem('ainovel-device-login'); return; }
-    if (status.data.status === 'authorization_pending' || status.data.status === 'slow_down') { setTimeout(poll, status.data.status === 'slow_down' ? delay + 5000 : delay); return; }
-    if (status.data.status === 'approved') {
-      sessionStorage.removeItem('ainovel-device-login');
-      window.location.reload();
+    loginPollInFlight = false;
+    if (!status.ok) {
+      clearDeviceLogin();
+      setLoginPending(false);
+      showApiToast('授权确认失败，请重新发起授权。', true);
+      return;
     }
-  };
-  setTimeout(poll, delay);
+    if (status.data.status === 'authorization_pending' || status.data.status === 'slow_down') {
+      attempt.next_poll_at = Date.now() + (status.data.status === 'slow_down' ? delay + 5000 : delay);
+      saveDeviceLogin(attempt);
+      resumeLogin();
+      return;
+    }
+    if (status.data.status === 'approved') {
+      clearDeviceLogin();
+      window.location.reload();
+      return;
+    }
+    clearDeviceLogin();
+    setLoginPending(false);
+    showApiToast('授权确认失败，请重新发起授权。', true);
+  }, Math.max(0, nextPollAt - Date.now()));
 }
 
 function wireGuestActions() {
@@ -599,4 +670,5 @@ async function logout() {
   window.location.reload();
 }
 
+window.addEventListener('pageshow', resumeLogin);
 init();
